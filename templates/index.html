@@ -44,6 +44,9 @@
         </nav>
 
         <div class="topbar-actions">
+            <button class="btn ghost" id="updates-button" title="Проверить обновления RouteDeck">
+                <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span id="updates-label">Обновления</span>
+            </button>
             <button class="btn ghost" data-action="transfer" title="Экспорт и импорт списков и IP-маршрутов — например, для другого роутера">
                 <svg viewBox="0 0 24 24"><path d="M7 20V4M3 8l4-4 4 4M17 4v16M13 16l4 4 4-4"/></svg><span class="hide-sm">Перенос</span>
             </button>
@@ -208,5 +211,6 @@
 
 <script>window.APP_NAME = {{ app_name|tojson }};</script>
 <script src="/static/js/app.js?v={{ app_version }}"></script>
+<script src="/static/js/updates.js?v={{ app_version }}"></script>
 </body>
 </html>

@@ -22,7 +22,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Callable, Dict, List
 from urllib.parse import urlparse
 
-from flask import Flask, render_template, request, jsonify, send_from_directory, abort
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, abort
 
 from services.database import Database
 from services.bat_generator import BatGenerator
@@ -30,6 +30,7 @@ from services.dns_resolver import DNSResolver
 from services.subnet_generator import generate_subnets
 from services.settings import Settings
 from services import transfer
+from services.updates import UpdateManager, UpdateError
 from services.capture.session import CaptureManager, agent_command_factory, list_apps
 from services.capture.store import CaptureStore
 from services.keenetic import (
@@ -79,6 +80,7 @@ db = Database()
 dns_resolver = DNSResolver()
 bat_generator = BatGenerator(dns_resolver=dns_resolver)
 settings = Settings()
+updates = UpdateManager(APP_VERSION, DATA_DIR)
 capture = CaptureManager(CaptureStore(), launcher={
     'command': agent_command_factory(FROZEN, RESOURCE_DIR),
     'cwd': os.path.dirname(sys.executable) if FROZEN else RESOURCE_DIR,
@@ -119,6 +121,8 @@ def api(func: Callable):
         except KeeneticError as e:
             logger.warning(f'{func.__name__}: {e}')
             return jsonify({'success': False, 'error': str(e), 'code': 'router'}), 502
+        except UpdateError as e:
+            return jsonify({'success': False, 'error': str(e), 'code': e.code}), 400
         except ValueError as e:
             return jsonify({'success': False, 'error': str(e)}), 400
         except Exception as e:
@@ -129,6 +133,43 @@ def api(func: Callable):
 
 def body() -> Dict:
     return request.get_json(silent=True) or {}
+
+
+# === Обновления приложения (без учётных данных GitHub и без доступа к роутеру) ===
+
+def update_view(data):
+    return jsonify({'success': True, **data, 'can_install': FROZEN and sys.platform == 'win32'})
+
+
+@app.route('/api/updates', methods=['GET'])
+@api
+def updates_status():
+    return update_view(updates.snapshot())
+
+
+@app.route('/api/updates/check', methods=['POST'])
+@api
+def updates_check():
+    return update_view(updates.check(manual=body().get('manual') is True))
+
+
+@app.route('/api/updates/download', methods=['POST'])
+@api
+def updates_download():
+    return update_view(updates.download())
+
+
+@app.route('/api/updates/cancel', methods=['POST'])
+@api
+def updates_cancel():
+    return update_view(updates.cancel_download())
+
+
+@app.route('/api/updates/file', methods=['GET'])
+@api
+def updates_file():
+    path, release = updates.verified_file()
+    return send_file(path, as_attachment=True, download_name='RouteDeck.exe', mimetype='application/octet-stream')
 
 
 # === Вспомогательные функции ===

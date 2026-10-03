@@ -1,0 +1,29 @@
+# Local application data and credentials
+settings.json*
+sites.db*
+sites.txt
+*.db
+*.sqlite*
+.env*
+*.pem
+*.key
+logs/
+bat_files/
+webview/
+window/
+instance.url
+backups/
+_backup*/
+.claude/
+.codex/
+.agents/
+.sync-local/
+# Generated files
+__pycache__/
+*.py[cod]
+build/
+dist/
+.venv/
+venv/
+*.log
+*.tmp

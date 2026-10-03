@@ -158,6 +158,31 @@ class UpdateTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=='nt','Windows helper')
 class InstallerTests(unittest.TestCase):
+    def test_brief_windows_file_lock_is_retried(self):
+        import ctypes,time
+        from ctypes import wintypes
+        with tempfile.TemporaryDirectory(prefix='install-lock-') as directory:
+            root=Path(directory); old=root/'RouteDeck.exe'; old.write_bytes(b'MZold version')
+            staged=root/'new.exe'; staged.write_bytes(DATA)
+            kernel=ctypes.windll.kernel32
+            kernel.CreateFileW.restype=ctypes.c_void_p
+            kernel.CreateFileW.argtypes=[wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p,wintypes.DWORD,wintypes.DWORD,ctypes.c_void_p]
+            kernel.CloseHandle.argtypes=[ctypes.c_void_p]
+            handle=kernel.CreateFileW(str(old),0x80000000,1,None,3,0,None)
+            if handle in (None,ctypes.c_void_p(-1).value): raise ctypes.WinError()
+            release_lock=threading.Event()
+            def release_handle():
+                release_lock.wait(2); kernel.CloseHandle(handle)
+            thread=threading.Thread(target=release_handle); thread.start()
+            child=subprocess.Popen([sys.executable,'-c','pass']); child.wait()
+            try:
+                cmd=helper_command(root,staged,old,hashlib.sha256(DATA).hexdigest(),'2.4.6',child.pid,start=False,notify=False)
+                result=subprocess.run(cmd,capture_output=True,timeout=30)
+                detail=(root/'install-result.json').read_text('utf-8-sig') if (root/'install-result.json').exists() else result.stderr
+                self.assertEqual(result.returncode,0,detail)
+                self.assertEqual(old.read_bytes(),DATA)
+            finally:
+                release_lock.set(); thread.join(3)
     def test_replace_waits_for_old_process_and_keeps_backup(self):
         with tempfile.TemporaryDirectory(prefix='install-test-') as directory:
             root=Path(directory); old=root/'RouteDeck.exe'; old.write_bytes(b'MZold version')

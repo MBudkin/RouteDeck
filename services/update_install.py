@@ -17,6 +17,16 @@ function FileHash([string]$path) {
     try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
     finally { $stream.Dispose(); $sha.Dispose() }
 }
+function MovePreviousExe([string]$source,[string]$destination) {
+    # PyInstaller's one-file parent or antivirus may hold the EXE briefly after the UI exits.
+    for ($attempt=0; $attempt -lt 40; $attempt++) {
+        try { [IO.File]::Move($source,$destination); return }
+        catch [IO.IOException] {
+            if ($attempt -eq 39) { throw }
+            [Threading.Thread]::Sleep(250)
+        }
+    }
+}
 $temp = $null
 $moved = $false
 try {
@@ -27,7 +37,7 @@ try {
     [IO.File]::Copy($p.source,$temp,$false)
     if ((FileHash $temp) -ne $p.sha256) { throw 'Не удалось проверить копию обновления.' }
     $backup = $p.target + '.backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
-    [IO.File]::Move($p.target,$backup)
+    MovePreviousExe $p.target $backup
     $moved = $true
     [IO.File]::Move($temp,$p.target)
     $temp = $null

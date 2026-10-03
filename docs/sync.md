@@ -36,3 +36,11 @@ Disable-ScheduledTask -TaskName 'RouteDeck GitHub Sync'
 4. Запустите `.sync-local\Check.ps1`. После успешной проверки файл попадёт в следующую синхронизацию.
 
 Манифест, служебные скрипты, локальные credentials и журнал состояния не публикуются вместе с программой.
+
+## Опубликованный проект
+
+Приватный репозиторий: https://github.com/MBudkin/RouteDeck
+
+Релиз существующей сборки 2.4.5: https://github.com/MBudkin/RouteDeck/releases/tag/v2.4.5
+
+Фоновая задача использует конфигурацию аккаунта без токена в .sync-local/gh-config и уже подтверждённую авторизацию Windows keyring. Пароли и OAuth-токены в исходниках или служебных скриптах не сохраняются.

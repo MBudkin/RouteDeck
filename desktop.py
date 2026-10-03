@@ -71,6 +71,34 @@ def focus_existing_window() -> bool:
 class ClipboardApi:
     """Доступ к буферу обмена Windows из страницы: window.pywebview.api.*"""
 
+    def __init__(self):
+        self._install_lock = threading.Lock()
+        self._install_started = False
+
+    def install_update(self):
+        """Called only by the explicit update-and-restart button in the local window."""
+        with self._install_lock:
+            if self._install_started:
+                return {'success': False, 'error': 'Обновление уже запускается.'}
+            if not getattr(sys, 'frozen', False) or sys.platform != 'win32':
+                return {'success': False, 'error': 'Сохраните EXE и обновите программу вручную.'}
+            from app import updates, capture
+            if capture.session and capture.session.running:
+                return {'success': False, 'error': 'Сначала остановите анализ программ.'}
+            try:
+                from services.update_install import start_install
+                result = start_install(updates, sys.executable, os.getpid())
+                self._install_started = True
+                def close_after_response():
+                    time.sleep(0.5)
+                    import webview
+                    if webview.windows:
+                        webview.windows[0].destroy()
+                threading.Thread(target=close_after_response, daemon=True).start()
+                return result
+            except Exception as error:
+                return {'success': False, 'error': str(error)}
+
     def restore_window(self) -> None:
         """Повторно показываем окно после возвращения с защищённого экрана UAC."""
         import webview

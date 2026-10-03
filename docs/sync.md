@@ -39,8 +39,10 @@ Disable-ScheduledTask -TaskName 'RouteDeck GitHub Sync'
 
 ## Опубликованный проект
 
-Приватный репозиторий: https://github.com/MBudkin/RouteDeck
+Публичный репозиторий: https://github.com/MBudkin/RouteDeck
 
-Релиз существующей сборки 2.4.5: https://github.com/MBudkin/RouteDeck/releases/tag/v2.4.5
+Предыдущий релиз 2.4.5: https://github.com/MBudkin/RouteDeck/releases/tag/v2.4.5
 
 Фоновая задача использует конфигурацию аккаунта без токена в .sync-local/gh-config и уже подтверждённую авторизацию Windows keyring. Пароли и OAuth-токены в исходниках или служебных скриптах не сохраняются.
+
+Текущий релиз 2.4.6: https://github.com/MBudkin/RouteDeck/releases/tag/v2.4.6

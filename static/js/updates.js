@@ -6,8 +6,8 @@ function renderUpdateBadge() {
     if (!el) return;
     const available = updateUI.data?.status === 'available';
     el.classList.toggle('has-update', available);
-    $('#updates-label').textContent = available ? `Обновление ${updateUI.data.release.version}` : 'Обновления';
-    el.title = available ? 'Доступна новая версия RouteDeck' : 'Проверить обновления RouteDeck';
+    el.title = available ? `Доступна версия RouteDeck ${updateUI.data.release.version}` : 'Проверить обновления RouteDeck';
+    el.setAttribute('aria-label', el.title);
 }
 
 function updateBody() {

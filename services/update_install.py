@@ -72,6 +72,19 @@ def helper_command(directory, staged, target, sha256, version, pid, *, start=Tru
     return [powershell,'-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','RemoteSigned','-File',str(helper),'-Payload',encoded]
 
 
+def clean_environment(environ=None):
+    """Environment for the helper and the restarted EXE without PyInstaller runtime state.
+
+    A one-file EXE passes _PYI_* variables to its children. If the new EXE inherits them,
+    it treats itself as part of the old process and looks for python3XX.dll in the old,
+    already deleted _MEI folder ("Failed to load Python DLL").
+    """
+    env = {k: v for k, v in (os.environ if environ is None else environ).items()
+           if not k.upper().startswith('_PYI_') and k.upper() != '_MEIPASS2'}
+    env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
+    return env
+
+
 def start_install(manager, target, pid):
     staged, release = manager.verified_file()
     target = Path(target).resolve()
@@ -82,5 +95,5 @@ def start_install(manager, target, pid):
         raise UpdateError('checksum', 'SHA-256 скачанного файла изменился.')
     command = helper_command(manager.directory, staged, target, release['sha256'], release['version'], pid)
     flags = getattr(subprocess,'CREATE_NO_WINDOW',0)
-    subprocess.Popen(command,creationflags=flags,close_fds=True)
+    subprocess.Popen(command,creationflags=flags,close_fds=True,env=clean_environment())
     return {'success':True, 'version':release['version']}

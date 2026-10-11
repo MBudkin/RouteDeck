@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import requests
 from services.updates import API_URL, UpdateError, UpdateManager, parse_release, version_tuple
-from services.update_install import helper_command
+from services.update_install import clean_environment, helper_command
 
 DATA = b'MZverified release binary fixture'
 
@@ -110,6 +110,10 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(len(s.calls),2)
         self.assertEqual(s.calls[1][1]['headers']['If-None-Match'],'"release"')
         self.assertEqual(m.snapshot()['status'],'available')
+    def test_restart_environment_drops_pyinstaller_state(self):
+        env=clean_environment({'PATH':'C:/Windows','_PYI_APPLICATION_HOME_DIR':'C:/Temp/_MEI1','_PYI_ARCHIVE_FILE':'x.exe',
+                               '_pyi_parent_process_level':'1','_MEIPASS2':'C:/Temp/_MEI1'})
+        self.assertEqual(env,{'PATH':'C:/Windows','PYINSTALLER_RESET_ENVIRONMENT':'1'})
     def test_automatic_check_retries_soon_after_failure(self):
         m,s=self.manager(Response(status=500),Response(data=release()),Response(data=release()))
         self.assertEqual(self.checked(m)['error']['code'],'offline')

@@ -19,13 +19,13 @@ VPN-подключений на разных роутерах отличаютс
 IP-маршруты группируются по описанию (comment): описание - это «чьи это адреса».
 
 Режимы импорта:
-    merge    - добавить к текущему: новые списки создаются, в списки с тем же
-               названием дописываются недостающие записи, ничего не удаляется;
-               у уже существующих IP без описания описание дописывается;
-    replace  - заменить совпадающие: списки с тем же названием и IP-группы с тем
-               же описанием перезаписываются целиком, остальные не трогаются;
-    replace_all - заменить всё: текущие списки, правила и статические маршруты
-               (кроме маршрута по умолчанию) удаляются и загружаются из файла.
+    merge    - обычный импорт: новые списки создаются, в списки с тем же названием
+               дописываются недостающие записи, недостающие правила добавляются.
+               IP-маршрут, который уже есть на роутере, пропускается, но его описание
+               обновляется по файлу. Ничего не удаляется;
+    replace_all - сначала очистить роутер: текущие списки, правила и статические
+               маршруты (кроме маршрута по умолчанию) удаляются и загружаются из файла.
+               Нужен для отката к резервной копии.
 """
 
 import ipaddress
@@ -37,7 +37,7 @@ from services.keenetic import (
 )
 
 FORMAT_VERSION = 1
-MODES = ('merge', 'replace', 'replace_all')
+MODES = ('merge', 'replace_all')
 
 
 def export_config(client: KeeneticClient, include_dns: bool = True, include_ip: bool = True,
@@ -111,10 +111,10 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
     summary = {'lists_created': 0, 'lists_updated': 0, 'lists_removed': 0,
                'entries_added': 0, 'rules_added': 0, 'rules_removed': 0,
                'ip_added': 0, 'ip_removed': 0, 'ip_updated': 0,
+               'entries_existing': 0, 'ip_existing': 0, 'ip_other_interface': 0,
                'skipped_entries': 0, 'warnings': []}
     head: List[Dict[str, Any]] = []   # удаления, которые должны пройти первыми
     body: List[Dict[str, Any]] = []   # создание и изменение
-    tail: List[Dict[str, Any]] = []   # удаления старых правил после создания новых
 
     if mode == 'replace_all':
         head += [{'dns-proxy': {'route': {'index': r.index, 'no': True}}} for r in current_routes]
@@ -160,56 +160,47 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
                                'reject': bool(r.get('reject', False)),
                                'enabled': bool(r.get('enabled', True))})
 
-        target = by_title.get(title.casefold())
-        if target and mode == 'merge':
-            final = target.entries + [e for e in entries if e not in target.entries]
-        else:
-            final = entries
+        # Список с тем же названием и его продолжения «Название (2)», «Название (3)»...
+        family = []
+        while True:
+            chunk_title = title if not family else f'{title} ({len(family) + 1})'
+            group = by_title.get(chunk_title.casefold())
+            if not group:
+                break
+            family.append(group)
+        existing_entries = {e for g in family for e in g.entries}
+        new_entries = [e for e in entries if e not in existing_entries]
+        summary['entries_existing'] += len(entries) - len(new_entries)
 
-        chunks = [final[i:i + MAX_GROUP_ENTRIES] for i in range(0, len(final), MAX_GROUP_ENTRIES)] or [[]]
-        if len(chunks) > 1:
-            summary['warnings'].append(
-                f'«{title}»: больше {MAX_GROUP_ENTRIES} записей — разбит на {len(chunks)} списка')
-
-        for n, chunk in enumerate(chunks):
-            chunk_title = title if n == 0 else f'{title} ({n + 1})'
-            existing = target if n == 0 else by_title.get(chunk_title.casefold())
-
-            if existing:
-                name = existing.name
-                added = [e for e in chunk if e not in existing.entries]
-                removed = [e for e in existing.entries if e not in chunk]
-                if removed:
-                    body.append({'object-group': {'fqdn': {name: {'include': {'no': True}}}}})
-                    body.append({'object-group': {'fqdn': {name: {
-                        'include': [{'address': e} for e in chunk]}}}})
-                elif added:
-                    body.append({'object-group': {'fqdn': {name: {
-                        'include': [{'address': e} for e in added]}}}})
-                if added or removed:
-                    summary['lists_updated'] += 1
+        # Новые записи дописываются в существующие списки до лимита, остальное - в новые.
+        targets = []
+        for group in family:
+            room = max(0, MAX_GROUP_ENTRIES - len(group.entries))
+            added, new_entries = new_entries[:room], new_entries[room:]
+            if added:
+                body.append({'object-group': {'fqdn': {group.name: {
+                    'include': [{'address': e} for e in added]}}}})
+                summary['lists_updated'] += 1
                 summary['entries_added'] += len(added)
-            else:
-                name = new_name()
-                body.append({'object-group': {'fqdn': {name: {
-                    'description': chunk_title,
-                    'include': [{'address': e} for e in chunk]}}}})
-                summary['lists_created'] += 1
-                summary['entries_added'] += len(chunk)
+            targets.append(group.name)
+        created = 0
+        while new_entries or not targets:
+            chunk, new_entries = new_entries[:MAX_GROUP_ENTRIES], new_entries[MAX_GROUP_ENTRIES:]
+            n = len(targets)
+            name = new_name()
+            body.append({'object-group': {'fqdn': {name: {
+                'description': title if n == 0 else f'{title} ({n + 1})',
+                'include': [{'address': e} for e in chunk]}}}})
+            summary['lists_created'] += 1
+            summary['entries_added'] += len(chunk)
+            targets.append(name)
+            created += 1
+        if len(targets) > 1 and created:
+            summary['warnings'].append(
+                f'«{title}»: больше {MAX_GROUP_ENTRIES} записей — разбит на {len(targets)} списка')
 
+        for name in targets:
             old_routes = routes_by_group.get(name, [])
-            if mode == 'replace' and existing and routes:
-                # Правила совпадающего списка заменяются правилами из файла.
-                keep = []
-                for r in old_routes:
-                    if any(r.interface == x['interface'] and r.auto == x['auto'] and r.reject == x['reject']
-                           and r.enabled == x['enabled'] for x in routes):
-                        keep.append(r)
-                    else:
-                        tail.append({'dns-proxy': {'route': {'index': r.index, 'no': True}}})
-                        summary['rules_removed'] += 1
-                old_routes = keep
-
             for r in routes:
                 if any(o.interface == r['interface'] for o in old_routes):
                     continue
@@ -247,45 +238,21 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
             if dst:
                 imported.append((r, str(net), comment, dst))
 
-        removed = set()
-        if mode == 'replace':
-            # Группа с тем же описанием перезаписывается: адреса, которых нет в файле, удаляются.
-            by_comment: Dict[str, set] = {}
-            for _, dest, comment, _ in imported:
-                if comment:
-                    by_comment.setdefault(comment.casefold(), set()).add(dest)
-            for c in current_ip:
-                keep = by_comment.get(c.comment.strip().casefold())
-                if keep is not None and c.destination not in keep and c.index:
-                    tail.append({'ip': {'route': {'index': c.index, 'no': True}}})
-                    removed.add(c.index)
-                    summary['ip_removed'] += 1
-
         for r, dest, comment, dst in imported:
-            same = [c for c in current_ip if c.destination == dest and c.index not in removed]
-            on_target = next((c for c in same if c.interface == dst), None)
-            if on_target:
-                # Маршрут уже есть: дописываем описание, если его не было (в режиме
-                # «Заменить» - и если оно отличается).
-                if comment and on_target.comment != comment and (mode != 'merge' or not on_target.comment):
-                    body.append(ip_route_command(on_target, comment=comment))
-                    on_target.comment = comment
+            same = [c for c in current_ip if c.destination == dest]
+            if same:
+                # Адрес уже есть на роутере - не дублируем и не переключаем подключение,
+                # но описание приводим к файлу.
+                summary['ip_existing'] += 1
+                existing = next((c for c in same if c.interface == dst), None)
+                if not existing:
+                    summary['ip_other_interface'] += 1
+                    existing = same[0]
+                if comment and existing.comment != comment and existing.index:
+                    body.append(ip_route_command(existing, comment=comment))
+                    existing.comment = comment
                     summary['ip_updated'] += 1
                 continue
-            if mode == 'merge' and same:
-                # Адрес уже направлен через другое подключение - в режиме «Дополнить» не трогаем,
-                # но описание всё равно дописываем.
-                if comment and not same[0].comment:
-                    body.append(ip_route_command(same[0], comment=comment))
-                    same[0].comment = comment
-                    summary['ip_updated'] += 1
-                continue
-            if mode == 'replace':
-                for c in same:
-                    if c.index not in removed:
-                        tail.append({'ip': {'route': {'index': c.index, 'no': True}}})
-                        removed.add(c.index)
-                        summary['ip_removed'] += 1
             route = IpRoute(index='', destination=dest, interface=dst,
                             auto=bool(r.get('auto', True)), reject=bool(r.get('reject', False)),
                             enabled=bool(r.get('enabled', True)), comment=comment)
@@ -293,12 +260,16 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
             current_ip.append(route)
             summary['ip_added'] += 1
 
+        if summary['ip_other_interface']:
+            summary['warnings'].append(
+                f'{summary["ip_other_interface"]} IP уже направлены через другое подключение — оставлены как есть')
+
     unmapped = [i for i in data.get('interfaces', []) if not iface_map.get(i.get('id'))]
     if unmapped:
         summary['warnings'].append('Без подключения (правила не создаются): '
                                    + ', '.join(i.get('title') or i.get('id') for i in unmapped))
 
-    return {'commands': head + body + tail, 'summary': summary}
+    return {'commands': head + body, 'summary': summary}
 
 
 def apply_import(client: KeeneticClient, plan: Dict[str, Any]) -> None:

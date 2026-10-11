@@ -1,13 +1,26 @@
 // Stable releases; downloads and restart always require a user action.
-const updateUI = { data: null, modal: null, request: null, poll: null };
+const updateUI = { data: null, modal: null, request: null, poll: null, notified: null };
 
 function renderUpdateBadge() {
     const el = $('#updates-button');
     if (!el) return;
     const available = updateUI.data?.status === 'available';
     el.classList.toggle('has-update', available);
-    el.title = available ? `Доступна версия RouteDeck ${updateUI.data.release.version}` : 'Проверить обновления RouteDeck';
+    el.title = available ? `Доступна версия RouteDeck ${updateUI.data.release.version} — нажмите, чтобы обновить` : 'Проверить обновления RouteDeck';
     el.setAttribute('aria-label', el.title);
+    let label = $('.update-label', el);
+    if (available && !label) { label = document.createElement('span'); label.className = 'update-label'; el.append(label); }
+    if (label && available) label.textContent = updateUI.data.release.version;
+    else label?.remove();
+}
+
+// О новой версии, найденной автоматической проверкой, сообщаем один раз за запуск.
+function notifyUpdate() {
+    const d = updateUI.data;
+    if (d?.status !== 'available' || updateUI.notified === d.release.version || updateUI.modal?.el.isConnected) return;
+    updateUI.notified = d.release.version;
+    toast(`Доступна новая версия RouteDeck ${d.release.version}. Нажмите, чтобы посмотреть изменения и обновить.`, 'info',
+          { timeout: 20000, onClick: openUpdates });
 }
 
 function updateBody() {
@@ -67,6 +80,7 @@ function applyUpdateState(data) {
     updateUI.data = data;
     renderUpdateBadge();
     renderUpdateModal();
+    notifyUpdate();
     const working = data.status === 'checking' || data.download?.status === 'downloading';
     if (!working && updateUI.poll) { clearInterval(updateUI.poll); updateUI.poll = null; }
     if (working && !updateUI.poll) {
@@ -100,6 +114,8 @@ function openUpdates() {
     checkUpdates(true);
 }
 
+// Автопроверка при запуске; дальше сервер сам решает, пора ли обращаться к GitHub
+// (раз в 6 часов, после сбоя сети - через 15 минут).
 setTimeout(() => checkUpdates(false), 1500);
-setInterval(() => checkUpdates(false), 6*60*60*1000);
+setInterval(() => checkUpdates(false), 15*60*1000);
 $('#updates-button')?.addEventListener('click',openUpdates);

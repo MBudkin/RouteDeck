@@ -99,6 +99,10 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+AUTO_CHECK_INTERVAL = 6 * 3600
+AUTO_RETRY_INTERVAL = 15 * 60
+
+
 class UpdateManager:
     def __init__(self, current_version, data_dir, *, session=None, clock=time.time):
         self.current = version_tuple(current_version)
@@ -128,7 +132,9 @@ class UpdateManager:
             if self.state['status'] == 'checking' or self.state['download']['status'] == 'downloading':
                 return self.snapshot()
             now = self.clock()
-            if now < self.retry_at or (self.last_attempt and now-self.last_attempt < (60 if manual else 6*3600)):
+            # Автоматическая проверка - раз в 6 часов; после сбоя сети повторяется через 15 минут.
+            interval = 60 if manual else (AUTO_CHECK_INTERVAL if not self.state['error'] else AUTO_RETRY_INTERVAL)
+            if now < self.retry_at or (self.last_attempt and now-self.last_attempt < interval):
                 return self.snapshot()
             self.last_attempt = now
             self.state['status'] = 'checking'

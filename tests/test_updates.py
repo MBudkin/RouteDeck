@@ -110,6 +110,13 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(len(s.calls),2)
         self.assertEqual(s.calls[1][1]['headers']['If-None-Match'],'"release"')
         self.assertEqual(m.snapshot()['status'],'available')
+    def test_automatic_check_retries_soon_after_failure(self):
+        m,s=self.manager(Response(status=500),Response(data=release()),Response(data=release()))
+        self.assertEqual(self.checked(m)['error']['code'],'offline')
+        self.now+=14*60; m.check(); self.assertEqual(len(s.calls),1)
+        self.now+=61; self.assertEqual(self.checked(m)['status'],'available')
+        self.now+=5*3600; m.check(); self.assertEqual(len(s.calls),2)
+        self.now+=3600; self.checked(m); self.assertEqual(len(s.calls),3)
     def test_rate_limit_waits_and_retains_valid_release(self):
         m,s=self.manager(Response(data=release()),Response(status=429,headers={'Retry-After':'300'}),Response(data=release()))
         self.checked(m); self.now+=61; m.check(manual=True); m._check_thread.join(3)

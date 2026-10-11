@@ -96,8 +96,14 @@ window.addEventListener('load', async () => {
         renderCapResults();
         let addedIps;
         openIpCreate = (...args) => { addedIps = args; };
+        assert(cap.agg24 && $('#cap-agg').checked && !$('#cap-results .cap-add-options').closest('details'),
+               'Объединение в /24 включено по умолчанию, параметры добавления не свёрнуты');
         capAddIps();
-        assert(addedIps[0] === '1.1.1.1' && addedIps[2] === 'Discord', 'Добавляются только видимые выбранные IP с названием программы');
+        assert(addedIps[0] === '1.1.1.0/24' && addedIps[2] === 'Discord', 'Добавляются только видимые выбранные IP с названием программы');
+        cap.agg24 = false;
+        capAddIps();
+        assert(addedIps[0] === '1.1.1.1', 'Без объединения добавляется отдельный IP');
+        cap.agg24 = true;
         cap.noDomainOnly = false;
         renderCapResults();
         $('[data-action="cap-program"][data-name="VS Code"]').click();
@@ -128,10 +134,11 @@ window.addEventListener('load', async () => {
         assert(window.scrollY === scrollBeforeHistory, 'Открытие истории не переносит прокрутку наверх');
         $('[data-action="cap-ip-all"]', archived).click();
         const archiveAggregate = $('#cap-hist-agg');
-        archiveAggregate.checked = true;
+        assert(archiveAggregate.checked, 'В истории объединение в /24 тоже включено по умолчанию');
+        archiveAggregate.checked = false;
         archiveAggregate.dispatchEvent(new Event('change', {bubbles: true}));
         capAddIps('history');
-        assert(addedIps[0] === '8.8.8.0/24' && addedIps[2] === 'Discord' && !cap.agg24 && !cap.selIps.size,
+        assert(addedIps[0] === '8.8.8.8' && addedIps[2] === 'Discord' && cap.agg24 && !cap.selIps.size,
                'IP и параметры добавления истории независимы от текущего анализа');
         $('[data-action="cap-dom-all"]', archived).click();
         assert(cap.archive.selDomains.size === 2 && [...cap.selDomains].join(',') === selectedBeforeHistory, 'Выбор доменов истории независим от текущего анализа');
@@ -220,10 +227,9 @@ window.addEventListener('load', async () => {
         closeCapHistory();
         actions['cap-setup-close']();
         assert(!!$('#cap-dom-list') && !cap.setup, 'Из выбора программ можно вернуться к последним результатам');
-        const resultOptions = $('#cap-results .cap-add-options');
-        resultOptions.open = true;
+        const resultOptions = $('#cap-results [data-cap-key="ip-options"]');
         renderCapResults();
-        assert(resultOptions === $('#cap-results .cap-add-options') && resultOptions.open, 'Параметры добавления сохраняют раскрытие при обновлении');
+        assert(resultOptions === $('#cap-results [data-cap-key="ip-options"]') && !!$('#cap-agg', resultOptions), 'Параметры добавления остаются на месте при обновлении');
         document.body.dataset.testStatus = 'passed';
         document.body.dataset.testCount = report.length;
     } catch (error) {
@@ -236,7 +242,6 @@ window.addEventListener('load', async () => {
         cap.session.running = false;
         renderCapture();
         $('.cap-details').open = false;
-        $('#cap-results .cap-add-options')?.removeAttribute('open');
         $('#toasts').innerHTML = '';
         const preview = new URLSearchParams(location.search);
         document.documentElement.dataset.theme = preview.get('theme') || 'dark';

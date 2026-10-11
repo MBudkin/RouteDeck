@@ -122,7 +122,7 @@ async function withButton(btn, fn) {
 // ============================================================ уведомления
 
 // Уведомление висит 6 с (ошибка — 12 с), при наведении мыши таймер замирает, клик закрывает.
-function toast(text, type = 'info', { loading = false, timeout = 6000 } = {}) {
+function toast(text, type = 'info', { loading = false, timeout = 6000, onClick = null } = {}) {
     const el = document.createElement('div');
     const icon = () => (el.classList.contains('loading') ? '' : type === 'success' ? ICONS.check : type === 'error' ? ICONS.x : ICONS.info);
     el.className = `toast ${type}${loading ? ' loading' : ''}`;
@@ -148,7 +148,8 @@ function toast(text, type = 'info', { loading = false, timeout = 6000 } = {}) {
         remaining = Math.max(1500, remaining - (Date.now() - startedAt));
     });
     el.addEventListener('mouseleave', () => { if (remaining) schedule(remaining); });
-    el.addEventListener('click', () => { if (!el.classList.contains('loading')) close(); });
+    if (onClick) el.classList.add('clickable');
+    el.addEventListener('click', () => { if (!el.classList.contains('loading')) { close(); onClick?.(); } });
     if (!loading) schedule(type === 'error' ? 12000 : timeout);
 
     return {
@@ -1232,14 +1233,10 @@ function openImport(data, fileName) {
                 ${data.groups.length} ${plural(data.groups.length, 'список', 'списка', 'списков')} (${entries} записей) ·
                 ${data.ip_routes?.length || 0} IP-маршрутов</div></div>
             <form id="import-form">
-                <h3>Как импортировать</h3>
+                <p class="import-how muted">Добавляется только то, чего на роутере ещё нет. Записи и IP, которые уже есть, пропускаются, а описания IP-маршрутов обновляются по файлу. Ничего не удаляется.</p>
                 <div class="modes">
-                    <label><input type="radio" name="mode" value="merge" checked><div><b>Только добавить</b>
-                        <small>Добавляется то, чего на роутере ещё нет. Ничего не удаляется. Пример: в вашем «Telegram» 5 адресов, в файле 3 других — станет 8.</small></div></label>
-                    <label><input type="radio" name="mode" value="replace"><div><b>Обновить как в файле</b>
-                        <small>Списки и IP-группы, которые есть и в файле, и на роутере, становятся в точности как в файле — лишнее из них удаляется. Остальные не трогаются. Пример: «Telegram» станет ровно 3 адреса из файла.</small></div></label>
-                    <label class="danger"><input type="radio" name="mode" value="replace_all"><div><b>Заменить всё</b>
-                        <small>Все списки, правила и статические маршруты роутера удаляются, загружается только файл. Маршрут по умолчанию не трогается.</small></div></label>
+                    <label class="danger"><input type="checkbox" name="clear"><div><b>Сначала очистить роутер</b>
+                        <small>Все списки, правила и статические маршруты роутера удаляются, затем загружается файл. Нужно для отката к резервной копии. Маршрут по умолчанию не трогается.</small></div></label>
                 </div>
 
                 ${ifaces.length ? `<h3>Подключения</h3>
@@ -1276,7 +1273,7 @@ function openImport(data, fileName) {
                 const ipComments = $$('input[name=ipc]:checked', f).map((c) => c.value);
                 return {
                     data,
-                    mode: f.mode.value,
+                    mode: f.clear.checked ? 'replace_all' : 'merge',
                     interface_map: Object.fromEntries($$('select[data-src]', f).map((s) => [s.dataset.src, s.value])),
                     groups: $$('input[name=group]:checked', f).map((c) => c.value),
                     include_ip: ipComments.length > 0,
@@ -1306,7 +1303,7 @@ function openImport(data, fileName) {
                 const p = payload();
                 if (p.mode === 'replace_all' && !await confirmDialog(
                     'Все текущие списки доменов, правила и статические маршруты этого роутера будут <b>удалены</b> и заменены данными из файла.<br><br>Перед импортом программа сохранит резервную копию.',
-                    { title: 'Заменить всё?', ok: 'Заменить всё' })) return;
+                    { title: 'Очистить роутер перед импортом?', ok: 'Очистить и импортировать' })) return;
                 await withButton($('.modal-foot .primary', el), async () => {
                     try {
                         const res = await api('/api/router/import', 'POST', p);
@@ -1316,7 +1313,7 @@ function openImport(data, fileName) {
                             size: 'sm',
                             body: `${renderImportSummary(res.summary, false)}
                                    <p class="muted" style="margin-top:14px">Резервная копия прежней конфигурации:<br><span class="mono">${esc(res.backup)}</span><br>
-                                   Чтобы откатиться, импортируйте этот файл в режиме «Заменить всё».</p>`,
+                                   Чтобы откатиться, импортируйте этот файл с отметкой «Сначала очистить роутер».</p>`,
                             foot: '<button class="btn primary" data-close autofocus>Готово</button>',
                         });
                         invalidateIpRoutes();
@@ -1339,7 +1336,8 @@ function renderImportSummary(s, future) {
     if (s.entries_added) items.push(`<span class="plus">+${n(s.entries_added, 'запись', 'записи', 'записей')}</span>`);
     if (s.rules_added || s.rules_removed) items.push(`Правила: <span class="plus">+${s.rules_added}</span>${s.rules_removed ? ` / <span class="minus">−${s.rules_removed}</span>` : ''}`);
     if (s.ip_added || s.ip_removed) items.push(`IP-маршруты: <span class="plus">+${s.ip_added}</span>${s.ip_removed ? ` / <span class="minus">−${s.ip_removed}</span>` : ''}`);
-    if (s.ip_updated) items.push(`Описание ${future ? 'будет дополнено' : 'дополнено'} у ${n(s.ip_updated, 'IP-маршрута', 'IP-маршрутов', 'IP-маршрутов')}`);
+    if (s.ip_updated) items.push(`Описание ${future ? 'будет обновлено' : 'обновлено'} у ${n(s.ip_updated, 'IP-маршрута', 'IP-маршрутов', 'IP-маршрутов')}`);
+    if (s.entries_existing || s.ip_existing) items.push(`<span class="muted">Уже на роутере, ${future ? 'будут пропущены' : 'пропущены'}: ${[s.entries_existing ? n(s.entries_existing, 'запись', 'записи', 'записей') : '', s.ip_existing ? `${s.ip_existing} IP` : ''].filter(Boolean).join(' и ')}</span>`);
     if (s.skipped_entries) items.push(`<span class="warn">Пропущено некорректных записей: ${s.skipped_entries}</span>`);
     (s.warnings || []).forEach((w) => items.push(`<span class="warn">${esc(w)}</span>`));
     if (!items.length) return 'Изменений нет — всё уже есть на роутере.';
@@ -1740,7 +1738,7 @@ const cap = {
     selDomains: new Set(),
     selIps: new Set(),
     exact: false,           // добавлять найденные поддомены, а не основной домен
-    agg24: false,           // объединять IP в подсети /24
+    agg24: true,            // объединять IP в подсети /24 (по умолчанию включено)
     noDomainOnly: false,
     query: '',
     newOnly: false,
@@ -1753,7 +1751,7 @@ const cap = {
 };
 
 function capResultState() {
-    return { selDomains: new Set(), selIps: new Set(), exact: false, agg24: false,
+    return { selDomains: new Set(), selIps: new Set(), exact: false, agg24: true,
              noDomainOnly: false, query: '', newOnly: false };
 }
 
@@ -2184,7 +2182,7 @@ function renderCapResults(scope) {
                 </header>
                 <div class="cap-selection-bar"><button class="link-btn" data-action="cap-dom-all" ${attr} ${groups.length ? '' : 'disabled'}>Выбрать все</button><button class="link-btn" data-action="cap-dom-none" ${attr} ${view.selDomains.size ? '' : 'disabled'}>Снять</button><span>${nd ? `Выбрано: ${nd}` : 'Ничего не выбрано'}${hiddenSelection(view.selDomains.size, nd)}</span></div>
                 <div class="cap-list" id="${prefix}-dom-list">${domRows || empty(filtered ? 'По этому фильтру домены не найдены' : waiting ? 'Пользуйтесь программой — домены появятся здесь' : 'Домены не найдены')}</div>
-                <footer class="cap-card-foot"><details class="cap-add-options" data-cap-key="domain-options"><summary>Параметры добавления</summary><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-exact" data-cap-option="exact" ${attr} ${view.exact ? 'checked' : ''}><span></span></span>Добавлять отдельные поддомены</label><small>Обычно достаточно основного домена: он включает поддомены.</small></details><button class="btn primary" data-action="cap-dom-add" ${attr} ${nd ? '' : 'disabled'}>${ICONS.plus} В DNS-список${nd ? ` (${nd})` : ''}</button></footer>
+                <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="domain-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-exact" data-cap-option="exact" ${attr} ${view.exact ? 'checked' : ''}><span></span></span>Добавлять отдельные поддомены</label><small>Обычно достаточно основного домена: он включает поддомены.</small></div><button class="btn primary" data-action="cap-dom-add" ${attr} ${nd ? '' : 'disabled'}>${ICONS.plus} В DNS-список${nd ? ` (${nd})` : ''}</button></footer>
             </section>
             <section class="card cap-card" data-cap-key="ip-card">
                 <header class="cap-card-head">
@@ -2192,7 +2190,7 @@ function renderCapResults(scope) {
                 </header>
                 <div class="cap-selection-bar"><button class="link-btn" data-action="cap-ip-all" ${attr} ${ips.some((i) => isIpv4(i.ip)) ? '' : 'disabled'}>Выбрать все</button><button class="link-btn" data-action="cap-ip-none" ${attr} ${view.selIps.size ? '' : 'disabled'}>Снять</button><span>${ni ? `Выбрано: ${ni}` : 'Ничего не выбрано'}${hiddenSelection(view.selIps.size, ni)}</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-nodomain" data-cap-option="noDomainOnly" ${attr} ${view.noDomainOnly ? 'checked' : ''}><span></span></span>Без домена</label></div>
                 <div class="cap-list" id="${prefix}-ip-list">${ipRows || empty(filtered ? 'По этому фильтру IP не найдены' : waiting ? 'Пользуйтесь программой — IP появятся здесь' : view.noDomainOnly ? 'Адресов без домена не найдено' : 'Адреса не найдены')}</div>
-                <footer class="cap-card-foot"><details class="cap-add-options" data-cap-key="ip-options"><summary>Параметры добавления</summary><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-agg" data-cap-option="agg24" ${attr} ${view.agg24 ? 'checked' : ''}><span></span></span>Объединять IP в подсети /24</label><small>Включайте, если хотите направлять и соседние адреса серверов.</small></details><button class="btn primary" data-action="cap-ip-add" ${attr} ${ni ? '' : 'disabled'}>${ICONS.plus} В IP-маршруты${ni ? ` (${ni})` : ''}</button></footer>
+                <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="ip-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-agg" data-cap-option="agg24" ${attr} ${view.agg24 ? 'checked' : ''}><span></span></span>Объединять IP в подсети /24</label><small>Через туннель пойдут и соседние адреса серверов. Отключите, чтобы добавить только точные IP.</small></div><button class="btn primary" data-action="cap-ip-add" ${attr} ${ni ? '' : 'disabled'}>${ICONS.plus} В IP-маршруты${ni ? ` (${ni})` : ''}</button></footer>
             </section>
         </div>${waiting ? '<p class="cap-update-note muted">Адреса обновляются автоматически. Выбранные строки сохраняются; новые строки можно отметить отдельно.</p>' : ''}`);
     [`#${prefix}-dom-list`, `#${prefix}-ip-list`].forEach((s, i) => { const el = $(s); if (el) el.scrollTop = scroll[i]; });

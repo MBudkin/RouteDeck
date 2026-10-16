@@ -190,11 +190,17 @@ class KeeneticClient:
         })
         self._lock = threading.RLock()
         self._authenticated = False
+        # После отказа в пароле не входим повторно: 5 неудачных попыток за 3 минуты
+        # роутер наказывает блокировкой IP компьютера на 15 минут. Сброс - новым
+        # клиентом после изменения настроек или проверки подключения.
+        self._auth_error: Optional[KeeneticAuthError] = None
 
     # --- транспорт ---
 
     def authenticate(self) -> None:
         with self._lock:
+            if self._auth_error:
+                raise self._auth_error
             try:
                 resp = self._session.get(f'{self.base_url}/auth', timeout=self.timeout)
             except requests.RequestException as e:
@@ -225,7 +231,10 @@ class KeeneticClient:
             )
             if resp.status_code != 200:
                 self._authenticated = False
-                raise KeeneticAuthError('Неверный логин или пароль роутера')
+                self._auth_error = KeeneticAuthError(
+                    'Неверный логин или пароль роутера. Повторных попыток входа не будет, '
+                    'пока не измените настройки: иначе роутер заблокирует компьютер на 15 минут')
+                raise self._auth_error
             self._authenticated = True
             logger.info('Авторизация на роутере %s выполнена', self.base_url)
 

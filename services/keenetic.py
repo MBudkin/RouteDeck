@@ -228,6 +228,10 @@ class KeeneticClient:
                     # Окончательно: попытка старым способом добавила бы ещё одну
                     # ошибку входа в счёт блокировки.
                     self._fail_auth()
+                except ndw4.Ndw4UnavailableError as e:
+                    logger.info('Вход NDW4 на %s недоступен (%s), вхожу прежним способом',
+                                self.base_url, e)
+                    resp = self._auth_probe()
                 except ndw4.Ndw4Error as e:
                     logger.warning('Вход NDW4 на %s не удался (%s), пробую прежний способ',
                                    self.base_url, e)

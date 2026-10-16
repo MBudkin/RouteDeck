@@ -32,8 +32,9 @@ class Response:
 class Router:
     """Router stand-in: verifies the NDW4 proof the way KeeneticOS 5.2 does."""
 
-    def __init__(self, password, offer_ndw4=True, accept_ndw2=False):
+    def __init__(self, password, offer_ndw4=True, accept_ndw2=False, migrated=True):
         self.password, self.offer_ndw4, self.accept_ndw2 = password, offer_ndw4, accept_ndw2
+        self.migrated = migrated
         self.cookies = type('Jar', (), {'clear': lambda self: None})()
         self.headers = {}
         self.logged_in = False
@@ -56,6 +57,8 @@ class Router:
             self.logged_in = ok
             return Response(200 if ok else 401)
         if 'proof' not in json and 'signature-proof' not in json:
+            if not self.migrated:  # password still stored the pre-5.2 way
+                return Response(401)
             nonce = json['nonce'] + base64.b64encode(os.urandom(12)).decode()
             self.state = {'nonce1': json['nonce'], 'nonce': nonce}
             return Response(401, data={'salt': base64.b64encode(SALT).decode(), 'nonce': nonce,
@@ -98,6 +101,12 @@ class SignInTest(unittest.TestCase):
             c.authenticate()
         self.assertEqual(attempts, len(router.posts))  # no second attempt
         self.assertFalse(any(url.endswith('/auth') for url, _ in router.posts))
+
+    def test_ndw2_when_password_not_migrated(self):
+        router = Router('Secret-1', accept_ndw2=True, migrated=False)
+        client(router, 'Secret-1').authenticate()
+        self.assertTrue(router.logged_in)
+        self.assertEqual(1, sum(url.endswith('/auth/ndw4') for url, _ in router.posts))
 
     def test_ndw2_on_older_firmware(self):
         router = Router('Secret-1', offer_ndw4=False, accept_ndw2=True)

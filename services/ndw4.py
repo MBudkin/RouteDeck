@@ -48,6 +48,14 @@ class Ndw4CredentialsError(Ndw4Error):
     """Роутер отклонил логин или пароль. Повторять нельзя: это попытка в счёт блокировки."""
 
 
+class Ndw4UnavailableError(Ndw4Error):
+    """
+    Роутер предлагает NDW4, но для этой учётной записи её нет: пароль ещё хранится
+    по-старому. Так отвечает 5.2, пока пароль не перенесён (401 без X-NDM-Data на
+    первом шаге); вход нужно выполнить прежним способом.
+    """
+
+
 class Ndw4ProtocolError(Ndw4Error):
     """Ответ роутера не соответствует обмену. О пароле ничего не говорит."""
 
@@ -90,8 +98,10 @@ def login(session: Any, base_url: str, endpoint: Optional[str], username: str,
     # 1. Представляемся, получаем соль, стоимость Argon2id и общий nonce.
     status, reply = _post(session, url, {'login': username, 'nonce': client_nonce}, timeout)
     if reply is None:
-        if status == 401:  # так роутер отвечает на неизвестное имя пользователя
-            raise Ndw4CredentialsError('роутер не принял имя пользователя')
+        if status == 401:
+            # Пароль не перенесён на NDW4 (или нет такого пользователя - тогда
+            # отклонит и прежний способ).
+            raise Ndw4UnavailableError('роутер не выдал параметры NDW4 для этой учётной записи')
         raise Ndw4ProtocolError(f'шаг 1: HTTP {status} без X-NDM-Data')
     _raise_on_error_field(reply, 'шаг 1')
     salt_b64 = _text(reply, 'salt', 'шаг 1')

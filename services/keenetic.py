@@ -7,6 +7,10 @@ RCI - это JSON-зеркало командной строки KeeneticOS, к�
     GET  /auth  -> 401 + заголовки X-NDM-Realm, X-NDM-Challenge и cookie сессии
     POST /auth  {"login": ..., "password": sha256(challenge + md5(login:realm:password))}
 
+KeeneticOS 5.2 дополнительно предлагает схему NDW4 (WWW-Authenticate:
+x-ndw4-interactive) и после переноса хранения пароля принимает только её -
+см. services/ndw4.py.
+
 После этого запросы к /rci/... выполняются в той же cookie-сессии.
 
 Используемые разделы конфигурации (KeeneticOS 4.x/5.x):
@@ -24,6 +28,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
+
+from services import ndw4
 
 logger = logging.getLogger(__name__)
 
@@ -198,45 +204,108 @@ class KeeneticClient:
     # --- транспорт ---
 
     def authenticate(self) -> None:
+        """
+        Вход по схеме, которую предлагает роутер: NDW4 (KeeneticOS 5.2) или
+        прежней md5/sha256 по X-NDM-Challenge. В 5.2 роутер предлагает обе, но
+        после переноса хранения пароля старую отклоняет даже с верным паролем,
+        поэтому NDW4 всегда в приоритете.
+        """
         with self._lock:
             if self._auth_error:
                 raise self._auth_error
-            try:
-                resp = self._session.get(f'{self.base_url}/auth', timeout=self.timeout)
-            except requests.RequestException as e:
-                raise KeeneticError(f'Роутер недоступен ({self.base_url}): {e}') from e
-
+            self._session.cookies.clear()
+            resp = self._auth_probe()
             if resp.status_code == 200:
                 self._authenticated = True
                 return
-            if resp.status_code != 401:
-                raise KeeneticError(f'Неожиданный ответ /auth: HTTP {resp.status_code}')
 
-            realm = resp.headers.get('X-NDM-Realm')
-            challenge = resp.headers.get('X-NDM-Challenge')
-            if not realm or not challenge:
-                www = resp.headers.get('WWW-Authenticate', '')
-                realm = realm or _header_param(www, 'realm')
-                challenge = challenge or _header_param(www, 'challenge')
-            if not realm or not challenge:
-                raise KeeneticError('Роутер не прислал challenge - это точно Keenetic?')
+            offered, endpoint = ndw4.parse_offer(resp)
+            if offered:
+                try:
+                    self._ndw4_login(endpoint)
+                    return
+                except ndw4.Ndw4CredentialsError:
+                    # Окончательно: попытка старым способом добавила бы ещё одну
+                    # ошибку входа в счёт блокировки.
+                    self._fail_auth()
+                except ndw4.Ndw4Error as e:
+                    logger.warning('Вход NDW4 на %s не удался (%s), пробую прежний способ',
+                                   self.base_url, e)
+                    resp = self._auth_probe()
+                    if not resp.headers.get('X-NDM-Challenge'):
+                        raise KeeneticError(f'Не удалось войти на роутер по новой схеме KeeneticOS 5.2: {e}')
+            self._ndw2_login(resp)
 
-            md5 = hashlib.md5(f'{self.login}:{realm}:{self.password}'.encode()).hexdigest()
-            key = hashlib.sha256(f'{challenge}{md5}'.encode()).hexdigest()
+    def _auth_probe(self) -> requests.Response:
+        """GET /auth: схемы входа, которые предлагает роутер, и cookie новой сессии."""
+        try:
+            resp = self._session.get(f'{self.base_url}/auth', timeout=self.timeout,
+                                     allow_redirects=False)
+        except requests.RequestException as e:
+            raise KeeneticError(f'Роутер недоступен ({self.base_url}): {e}') from e
+        if resp.is_redirect:
+            raise KeeneticError(f'Роутер перенаправляет {self.base_url} на '
+                                f'{resp.headers.get("Location")}: укажите в настройках этот адрес')
+        if resp.status_code not in (200, 401):
+            raise KeeneticError(f'Неожиданный ответ /auth: HTTP {resp.status_code}')
+        return resp
 
-            resp = self._session.post(
-                f'{self.base_url}/auth',
-                json={'login': self.login, 'password': key},
-                timeout=self.timeout,
-            )
-            if resp.status_code != 200:
-                self._authenticated = False
-                self._auth_error = KeeneticAuthError(
-                    'Неверный логин или пароль роутера. Повторных попыток входа не будет, '
-                    'пока не измените настройки: иначе роутер заблокирует компьютер на 15 минут')
-                raise self._auth_error
-            self._authenticated = True
-            logger.info('Авторизация на роутере %s выполнена', self.base_url)
+    def _ndw4_login(self, endpoint: Optional[str]) -> None:
+        try:
+            ndw4.login(self._session, self.base_url, endpoint, self.login, self.password, self.timeout)
+        except ndw4.Ndw4ProtocolError as e:
+            # Сессия роутера живёт 20 секунд; сбой обмена лечится новой сессией.
+            logger.info('Вход NDW4: %s - повторяю с новой сессией', e)
+            self._session.cookies.clear()
+            offered, endpoint = ndw4.parse_offer(self._auth_probe())
+            if not offered:
+                raise
+            ndw4.login(self._session, self.base_url, endpoint, self.login, self.password, self.timeout)
+        except requests.RequestException as e:
+            raise KeeneticError(f'Роутер недоступен ({self.base_url}): {e}') from e
+        self._confirm_login('NDW4')
+
+    def _ndw2_login(self, resp: requests.Response) -> None:
+        """Вход KeeneticOS до 5.2: sha256(challenge + md5(login:realm:password))."""
+        realm = resp.headers.get('X-NDM-Realm')
+        challenge = resp.headers.get('X-NDM-Challenge')
+        if not realm or not challenge:
+            www = resp.headers.get('WWW-Authenticate', '')
+            realm = realm or _header_param(www, 'realm')
+            challenge = challenge or _header_param(www, 'challenge')
+        if not realm or not challenge:
+            raise KeeneticError('Роутер не прислал challenge - это точно Keenetic?')
+
+        md5 = hashlib.md5(f'{self.login}:{realm}:{self.password}'.encode()).hexdigest()
+        key = hashlib.sha256(f'{challenge}{md5}'.encode()).hexdigest()
+        try:
+            resp = self._session.post(f'{self.base_url}/auth', timeout=self.timeout,
+                                      json={'login': self.login, 'password': key},
+                                      allow_redirects=False)
+        except requests.RequestException as e:
+            raise KeeneticError(f'Роутер недоступен ({self.base_url}): {e}') from e
+        if resp.status_code != 200:
+            self._fail_auth()
+        self._authenticated = True
+        logger.info('Авторизация на роутере %s выполнена', self.base_url)
+
+    def _confirm_login(self, scheme: str) -> None:
+        try:
+            resp = self._session.get(f'{self.base_url}/auth', timeout=self.timeout,
+                                     allow_redirects=False)
+        except requests.RequestException as e:
+            raise KeeneticError(f'Роутер недоступен ({self.base_url}): {e}') from e
+        if resp.status_code != 200:
+            raise KeeneticError(f'Роутер не подтвердил вход {scheme}: HTTP {resp.status_code}')
+        self._authenticated = True
+        logger.info('Авторизация на роутере %s выполнена (%s)', self.base_url, scheme)
+
+    def _fail_auth(self) -> None:
+        self._authenticated = False
+        self._auth_error = KeeneticAuthError(
+            'Неверный логин или пароль роутера. Повторных попыток входа не будет, '
+            'пока не измените настройки: иначе роутер заблокирует компьютер на 15 минут')
+        raise self._auth_error
 
     def _request(self, method: str, path: str, payload: Any = None,
                  read_timeout: Optional[float] = None) -> Any:

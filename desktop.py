@@ -10,6 +10,7 @@ RouteDeck - запуск как настольного приложения.
 
 import ctypes
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -53,6 +54,51 @@ def running_instance(port_file: str):
     except Exception:
         pass
     return None
+
+
+def instance_version(url: str):
+    """Версия запущенной копии - из заголовка её страницы (есть и в старых версиях)."""
+    try:
+        with urllib.request.urlopen(url, timeout=1.5) as resp:
+            page = resp.read(4096).decode('utf-8', errors='replace')
+        match = re.search(rf'<title>{APP_NAME} ([0-9][0-9.]*)</title>', page)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def close_other_version(port_file: str, version) -> bool:
+    """
+    Предлагает закрыть запущенную копию другой версии. Без этого новая версия не
+    запустилась бы: второй экземпляр только переключает на уже открытое окно.
+    """
+    user32 = ctypes.windll.user32
+    title = f'{APP_NAME} {version}' if version else APP_NAME
+    answer = user32.MessageBoxW(
+        None,
+        f'Уже запущена {title}. Чтобы запустить {APP_NAME} {APP_VERSION}, её нужно закрыть.\n\n'
+        'Закрыть её сейчас?',
+        f'{APP_NAME} {APP_VERSION}', 0x04 | 0x30 | 0x10000)  # Да/Нет, предупреждение, поверх окон
+    if answer != 6:  # IDYES
+        return False
+    hwnd = user32.FindWindowW(None, title) if version else 0
+    if hwnd:
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE - копия завершится штатно
+        for _ in range(40):
+            time.sleep(0.5)
+            # Файл адреса копия удаляет последним, уже остановив свой сервер.
+            if not os.path.exists(port_file):
+                for _ in range(10):
+                    if port_is_free(PREFERRED_PORT):
+                        break
+                    time.sleep(0.5)
+                return True
+    user32.MessageBoxW(
+        None,
+        f'Не удалось закрыть {title}. Закройте её окно или завершите процесс '
+        f'{APP_NAME}.exe в Диспетчере задач, затем запустите программу снова.',
+        f'{APP_NAME} {APP_VERSION}', 0x30 | 0x10000)
+    return False
 
 
 def focus_existing_window() -> bool:
@@ -182,9 +228,14 @@ def main():
     from werkzeug.serving import make_server
 
     port_file = os.path.join(DATA_DIR, 'instance.url')
-    if running_instance(port_file):
-        focus_existing_window()
-        return
+    existing = running_instance(port_file)
+    if existing:
+        version = instance_version(existing)
+        if version == APP_VERSION:
+            focus_existing_window()
+            return
+        if not close_other_version(port_file, version):
+            return
 
     port = pick_port()
     url = f'http://127.0.0.1:{port}/'

@@ -446,9 +446,12 @@ def router_settings_save():
               if data.get(k) is not None}
     if data.get('router_password'):
         values['router_password'] = data['router_password']
+    if data.get('forget_password'):
+        values['router_password'] = ''
     settings.update(**values)
     reset_router()
-    return jsonify({'success': True, 'settings': settings.public(), 'message': 'Настройки сохранены'})
+    message = 'Сохранённый пароль удалён' if data.get('forget_password') else 'Настройки сохранены'
+    return jsonify({'success': True, 'settings': settings.public(), 'message': message})
 
 
 @app.route('/api/router/test', methods=['POST'])

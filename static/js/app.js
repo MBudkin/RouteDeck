@@ -389,10 +389,30 @@ function openSettings() {
                     <label class="field"><span>Пароль</span>
                         <input type="password" name="router_password" placeholder="${s.has_password ? '•••••••• (сохранён)' : 'Пароль администратора'}" ${s.has_password ? '' : 'required'}></label>
                 </div>
+                ${s.has_password ? `<div class="forget-password"><button type="button" class="btn ghost" data-forget-password>Забыть пароль</button>
+                    <span class="muted">Удалит сохранённый пароль. Введите новый, чтобы подключиться.</span></div>` : ''}
             </form>`,
         foot: `<button class="btn ghost" data-close>Отмена</button>
                <button class="btn primary" type="submit" form="settings-form">Подключиться</button>`,
         onMount: ({ el, close }) => {
+            const forget = $('[data-forget-password]', el);
+            if (forget) forget.onclick = () => withButton(forget, async () => {
+                try {
+                    const res = await api('/api/router/settings', 'PUT', { forget_password: true });
+                    state.settings = res.settings;
+                    const input = $('[name=router_password]', el);
+                    input.value = '';
+                    input.placeholder = 'Пароль администратора';
+                    input.required = true;
+                    forget.parentElement.remove();
+                    input.focus();
+                    state.connected = false;
+                    setConn('err', 'Нет пароля');
+                    toast(res.message, 'success');
+                } catch (err) {
+                    toast(err.message, 'error');
+                }
+            });
             $('form', el).onsubmit = async (e) => {
                 e.preventDefault();
                 const f = e.target;

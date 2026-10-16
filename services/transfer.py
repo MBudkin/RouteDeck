@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from services.keenetic import (
-    IpRoute, KeeneticClient, MAX_GROUP_ENTRIES, ip_route_command, normalize_entry,
+    IpRoute, KeeneticClient, MAX_GROUP_ENTRIES, ip_route_command, is_routable, normalize_entry,
 )
 
 FORMAT_VERSION = 1
@@ -110,7 +110,7 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
 
     summary = {'lists_created': 0, 'lists_updated': 0, 'lists_removed': 0,
                'entries_added': 0, 'rules_added': 0, 'rules_removed': 0,
-               'ip_added': 0, 'ip_removed': 0, 'ip_updated': 0,
+               'ip_added': 0, 'ip_removed': 0, 'ip_updated': 0, 'ip_skipped_local': 0,
                'entries_existing': 0, 'ip_existing': 0, 'ip_other_interface': 0,
                'skipped_entries': 0, 'warnings': []}
     head: List[Dict[str, Any]] = []   # удаления, которые должны пройти первыми
@@ -230,6 +230,9 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
                 continue
             if net.version != 4 or net.prefixlen == 0:
                 continue
+            if not is_routable(net):
+                summary['ip_skipped_local'] += 1
+                continue
             if comments_filter is not None and comment.casefold() not in comments_filter:
                 continue
             if dest_filter is not None and str(net) not in dest_filter:
@@ -263,6 +266,10 @@ def plan_import(client: KeeneticClient, data: Dict[str, Any], mode: str,
         if summary['ip_other_interface']:
             summary['warnings'].append(
                 f'{summary["ip_other_interface"]} IP уже направлены через другое подключение — оставлены как есть')
+        if summary['ip_skipped_local']:
+            summary['warnings'].append(
+                f'{summary["ip_skipped_local"]} локальных адресов пропущено: '
+                'маршрут к ним через туннель нарушил бы доступ к домашней сети')
 
     unmapped = [i for i in data.get('interfaces', []) if not iface_map.get(i.get('id'))]
     if unmapped:

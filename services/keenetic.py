@@ -30,6 +30,19 @@ logger = logging.getLogger(__name__)
 # KeeneticOS 5.x ограничивает один список 300 записями.
 MAX_GROUP_ENTRIES = 300
 
+# Сколько ждать соединения с роутером и сколько добавлять к ожиданию ответа
+# на каждую команду пакета: 1400 маршрутов роутер переносит около 40 секунд.
+CONNECT_TIMEOUT = 10
+SECONDS_PER_COMMAND = 0.05
+MAX_WRITE_TIMEOUT = 600
+
+# Локальные и служебные сети: маршрут к ним через туннель уводит в него
+# ответы роутера компьютерам домашней сети, и веб-интерфейс перестаёт открываться.
+NON_ROUTABLE_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    '0.0.0.0/8', '10.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',
+    '192.168.0.0/16', '224.0.0.0/4', '240.0.0.0/4',
+))
+
 # Типы интерфейсов, через которые обычно пускают трафик (туннели и прокси).
 TUNNEL_TYPES = {
     'wireguard', 'openvpn', 'pptp', 'l2tp', 'sstp', 'ikev2', 'ipsec',
@@ -216,14 +229,23 @@ class KeeneticClient:
             self._authenticated = True
             logger.info('Авторизация на роутере %s выполнена', self.base_url)
 
-    def _request(self, method: str, path: str, payload: Any = None) -> Any:
+    def _request(self, method: str, path: str, payload: Any = None,
+                 read_timeout: Optional[float] = None) -> Any:
         url = f'{self.base_url}/rci/{path.lstrip("/")}'
+        timeout = (min(CONNECT_TIMEOUT, self.timeout), read_timeout or self.timeout)
         with self._lock:
             if not self._authenticated:
                 self.authenticate()
             for attempt in range(2):
                 try:
-                    resp = self._session.request(method, url, json=payload, timeout=self.timeout)
+                    resp = self._session.request(method, url, json=payload, timeout=timeout)
+                except requests.ReadTimeout as e:
+                    if method != 'GET':
+                        # Соединение было, команды переданы - роутер их ещё выполняет.
+                        raise KeeneticError(
+                            f'Роутер не ответил за {timeout[1]:.0f} с, но команды, скорее всего, '
+                            'ещё выполняются. Подождите минуту и обновите страницу.') from e
+                    raise KeeneticError(f'Роутер не ответил за {timeout[1]:.0f} с: {e}') from e
                 except requests.RequestException as e:
                     raise KeeneticError(f'Роутер недоступен: {e}') from e
                 if resp.status_code == 401 and attempt == 0:
@@ -253,7 +275,8 @@ class KeeneticClient:
         batch = list(commands)
         if save:
             batch.append({'system': {'configuration': {'save': {}}}})
-        return self._request('POST', '', batch)
+        read_timeout = min(MAX_WRITE_TIMEOUT, self.timeout + len(batch) * SECONDS_PER_COMMAND)
+        return self._request('POST', '', batch, read_timeout=read_timeout)
 
     # --- информация ---
 
@@ -498,13 +521,16 @@ class KeeneticClient:
         существующего маршрута нет описания, а новое передано - оно дописывается.
         """
         current = {r.destination: r for r in self.ip_routes()}
-        commands, added, updated = [], 0, 0
+        commands, added, updated, skipped = [], 0, 0, 0
         for dest in destinations:
             try:
                 net = ipaddress.ip_network(dest, strict=False)
             except ValueError:
                 continue
             if net.version != 4 or net.prefixlen == 0:
+                continue
+            if not is_routable(net):
+                skipped += 1
                 continue
             existing = current.get(str(net))
             if existing:
@@ -520,7 +546,9 @@ class KeeneticClient:
             added += 1
         if commands:
             self.write(commands)
-        return {'added': added, 'updated': updated}
+        if skipped:
+            logger.warning('Пропущено локальных адресов при добавлении маршрутов: %s', skipped)
+        return {'added': added, 'updated': updated, 'skipped': skipped}
 
     def delete_ip_routes(self, indices: Iterable[str]) -> int:
         commands = [{'ip': {'route': {'index': i, 'no': True}}}
@@ -570,6 +598,12 @@ class KeeneticClient:
 
 
 # === Вспомогательные функции ===
+
+def is_routable(net: Any) -> bool:
+    """False для адресов домашней сети, loopback, multicast и прочих служебных сетей."""
+    net = ipaddress.ip_network(net, strict=False)
+    return not any(net.version == b.version and net.subnet_of(b) for b in NON_ROUTABLE_NETWORKS)
+
 
 def ip_route_command(route: IpRoute, interface: Optional[str] = None,
                      comment: Optional[str] = None) -> Dict[str, Any]:

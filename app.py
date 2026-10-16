@@ -684,7 +684,7 @@ def router_ip_routes_add():
     comment = (data.get('comment') or '').strip()
     auto = bool(data.get('auto', True))
     client = router()
-    total = {'added': 0, 'updated': 0}
+    total = {'added': 0, 'updated': 0, 'skipped': 0}
 
     def add(dests, note):
         result = client.add_ip_routes(dests, interface, auto=auto, comment=note)
@@ -702,6 +702,8 @@ def router_ip_routes_add():
         parts.append(f"добавлено {total['added']}")
     if total['updated']:
         parts.append(f"дополнено описание у {total['updated']}")
+    if total['skipped']:
+        parts.append(f"пропущено локальных адресов: {total['skipped']}")
     return jsonify({'success': True, **total,
                     'message': ('Маршруты: ' + ', '.join(parts)) if parts else 'Все адреса уже есть на роутере'})
 

@@ -165,6 +165,16 @@ class CaptureStore:
                 'ips': [finish(i) for i in ips.values()],
                 'domains': [finish(d) for d in domains.values()]}
 
+    def delete_all(self, keep_session: int = None) -> int:
+        """Удаляет всю историю, кроме сеанса keep_session (идущего анализа)."""
+        with self._conn() as c:
+            ids = [r[0] for r in c.execute('SELECT id FROM capture_sessions') if r[0] != keep_session]
+            for session_id in ids:
+                for table in ('capture_ips', 'capture_domains', 'capture_session_apps'):
+                    c.execute(f'DELETE FROM {table} WHERE session_id = ?', (session_id,))
+                c.execute('DELETE FROM capture_sessions WHERE id = ?', (session_id,))
+            return len(ids)
+
     def delete_program(self, name: str) -> int:
         with self._conn() as c:
             ids = [r[0] for r in c.execute('SELECT session_id FROM capture_session_apps WHERE name = ?', (name,))]

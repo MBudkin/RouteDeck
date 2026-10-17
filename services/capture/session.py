@@ -571,9 +571,10 @@ class CaptureManager:
                                   folder='' if shared_folder(folder) else folder))
         if not apps:
             raise ValueError('Выберите программу')
-        names = [a.name.casefold() for a in apps]
-        if len(set(names)) != len(names):
-            raise ValueError('У каждой программы должно быть отдельное название')
+        # Одинаковые названия (Codex и codex) - одна программа: общие результаты и история.
+        spelling: Dict[str, str] = {}
+        for app in apps:
+            app.name = spelling.setdefault(app.name.casefold(), app.name)
         return apps
 
     def start(self, spec: Dict, base_url: str) -> CaptureSession:

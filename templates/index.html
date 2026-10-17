@@ -88,6 +88,20 @@
                     <kbd>/</kbd>
                 </label>
                 <div class="search-hint" id="dns-search-hint"></div>
+                <div class="seg view-switch" role="group" aria-label="Вид списков">
+                    <button class="seg-btn" data-action="dns-view" data-view="cards" title="Карточками" aria-label="Карточками">
+                        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
+                    </button>
+                    <button class="seg-btn" data-action="dns-view" data-view="list" title="Списком" aria-label="Списком">
+                        <svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="bulkbar" id="dns-bulk" hidden>
+                <span id="dns-bulk-count"></span>
+                <button class="btn ghost sm" data-action="dns-merge">Объединить…</button>
+                <button class="btn ghost sm" data-action="dns-clear-selection">Снять выбор</button>
             </div>
 
             <div class="stats" id="dns-stats"></div>
@@ -118,12 +132,14 @@
                     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
                     <input type="search" id="ip-search" placeholder="Фильтр по адресу, интерфейсу, описанию…" autocomplete="off">
                 </label>
+                <button class="btn ghost sm" data-action="ipg-collapse-all" id="ip-collapse-all" hidden></button>
             </div>
             <div class="bulkbar" id="ip-bulk" hidden>
                 <span id="ip-bulk-count"></span>
                 <button class="btn ghost sm" data-action="ip-enable-selected">Включить</button>
                 <button class="btn ghost sm" data-action="ip-disable-selected">Выключить</button>
                 <button class="btn ghost sm" data-action="ip-comment-selected">Описание…</button>
+                <button class="btn ghost sm" data-action="ip-merge-selected" id="ip-merge-btn" hidden title="Перенести выбранные маршруты в одну группу">Объединить группы…</button>
                 <button class="btn ghost sm" data-action="ip-move-selected">Сменить интерфейс…</button>
                 <button class="btn ghost sm" data-action="ip-export-selected">Экспорт</button>
                 <button class="btn danger sm" data-action="ip-delete-selected">Удалить</button>

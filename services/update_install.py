@@ -17,43 +17,49 @@ function FileHash([string]$path) {
     try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
     finally { $stream.Dispose(); $sha.Dispose() }
 }
-function MovePreviousExe([string]$source,[string]$destination) {
-    # PyInstaller's one-file parent or antivirus may hold the EXE briefly after the UI exits.
-    for ($attempt=0; $attempt -lt 40; $attempt++) {
-        try { [IO.File]::Move($source,$destination); return }
+function WriteInPlace([string]$source,[string]$target) {
+    # The EXE is overwritten in place, not renamed: Windows keeps taskbar pins and shortcuts
+    # on the same file. A renamed old EXE would take the pin with it and the new version
+    # would appear as a separate icon. PyInstaller's one-file parent or antivirus may hold
+    # the file briefly after the UI exits, so opening is retried.
+    for ($attempt=0; ; $attempt++) {
+        try { $out = [IO.File]::Open($target,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None); break }
         catch [IO.IOException] {
-            if ($attempt -eq 39) { throw }
+            if ($attempt -ge 39) { throw }
             [Threading.Thread]::Sleep(250)
         }
     }
+    try {
+        $in = [IO.File]::OpenRead($source)
+        try { $out.SetLength(0); $in.CopyTo($out); $out.Flush($true) } finally { $in.Dispose() }
+    } finally { $out.Dispose() }
 }
-$temp = $null
-$moved = $false
+$backup = $null
+$written = $false
 try {
     try { $oldProcess = [Diagnostics.Process]::GetProcessById([int]$p.pid) } catch [ArgumentException] { $oldProcess = $null }
     if ($oldProcess -and -not $oldProcess.WaitForExit(60000)) { throw 'Приложение не закрылось. Обновление не установлено.' }
     if ((FileHash $p.source) -ne $p.sha256) { throw 'SHA-256 обновления изменился.' }
-    $temp = $p.target + '.update-' + [Guid]::NewGuid().ToString('N') + '.tmp'
-    [IO.File]::Copy($p.source,$temp,$false)
-    if ((FileHash $temp) -ne $p.sha256) { throw 'Не удалось проверить копию обновления.' }
-    $backup = $p.target + '.backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
-    MovePreviousExe $p.target $backup
-    $moved = $true
-    [IO.File]::Move($temp,$p.target)
-    $temp = $null
+    # One copy of the previous version in the data folder, not next to the program.
+    $backup = Join-Path $p.backup_dir 'RouteDeck-previous.exe'
+    [IO.File]::Copy($p.target,$backup,$true)
+    $written = $true
+    WriteInPlace $p.source $p.target
     if ((FileHash $p.target) -ne $p.sha256) { throw 'Не удалось проверить установленный файл.' }
+    # Leftovers of the previous installer, which renamed the old EXE next to the new one.
+    Get-ChildItem -LiteralPath (Split-Path -Parent $p.target) -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like ((Split-Path -Leaf $p.target) + '.backup-*') -or $_.Name -like ((Split-Path -Leaf $p.target) + '.update-*.tmp') } |
+        ForEach-Object { try { $_.Delete() } catch {} }
     @{ok=$true;version=$p.version;backup=$backup} | ConvertTo-Json | Set-Content -LiteralPath $p.result -Encoding UTF8
     if ($p.start) { Start-Process -FilePath $p.target -WorkingDirectory (Split-Path -Parent $p.target) }
     exit 0
 } catch {
-    if ($moved -and $backup -and [IO.File]::Exists($backup)) { [IO.File]::Copy($backup,$p.target,$true) }
+    if ($written -and $backup -and [IO.File]::Exists($backup)) { try { WriteInPlace $backup $p.target } catch {} }
     @{ok=$false;error=$_.Exception.Message} | ConvertTo-Json | Set-Content -LiteralPath $p.result -Encoding UTF8
     if ($p.notify) {
         try { Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.MessageBox]::Show('Обновление не установлено. ' + $_.Exception.Message + ' Скачанный EXE можно сохранить вручную.','RouteDeck') | Out-Null } catch {}
     }
     exit 1
-} finally {
-    if ($temp -and [IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
 }
 '''
 
@@ -66,7 +72,7 @@ def helper_command(directory, staged, target, sha256, version, pid, *, start=Tru
     helper.write_text(HELPER, encoding='utf-8-sig')
     payload = {'source':str(Path(staged).resolve()), 'target':str(Path(target).resolve()),
                'sha256':sha256, 'version':version, 'pid':pid, 'start':start, 'notify':notify,
-               'result':str(directory/'install-result.json')}
+               'backup_dir':str(directory), 'result':str(directory/'install-result.json')}
     encoded = base64.b64encode(json.dumps(payload,ensure_ascii=False).encode('utf-8')).decode('ascii')
     powershell = str(Path(os.environ.get('SystemRoot', r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe')
     return [powershell,'-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','RemoteSigned','-File',str(helper),'-Payload',encoded]

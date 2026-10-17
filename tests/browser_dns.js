@@ -4,6 +4,14 @@ window.fetch = async (url, opts = {}) => {
     let body = {success: true};
     if (url === '/api/router/settings') body.settings = {has_password: false};
     else if (url === '/api/sites') body.sites = [];
+    else if (url === '/api/router/overview') Object.assign(body, {system: {model: 'Тестовый роутер', release: '5.0'}, interfaces: [],
+        groups: state.groups, limit: 300, default_interface: ''});
+    else if (url === '/api/router/groups/merge') {
+        const payload = JSON.parse(opts.body);
+        window.dnsTestRequests.push({url, payload});
+        state.groups = state.groups.filter((g) => !payload.sources.includes(g.name));
+        body.message = 'Объединено';
+    }
     else if (opts.method === 'DELETE' && url.endsWith('/entries')) {
         const payload = JSON.parse(opts.body);
         window.dnsTestRequests.push({url, payload});
@@ -118,6 +126,40 @@ window.addEventListener('load', async () => {
         await removeEntry(target.name, 'last.example.net');
         check(!!$('.chips-empty', card(target.name)) && Math.abs(window.scrollY - lastY) <= 1,
               'Удаление последнего домена показывает пустой список без скачка страницы');
+
+        // Вид «списком» и объединение списков.
+        state.groups = [group(1, 6), group(2, 4), group(3, 3)];
+        state.expanded.clear();
+        box.style.width = '1180px';
+        actions['dns-view']({dataset: {view: 'list'}});
+        const row = (name) => $(`.glist-row[data-name="${name}"]`, box);
+        check(!!$('.glist', box) && $$('.glist-row', box).length === 3 && !$('.group', box) && storage('s4r-dns-view') === 'list', 'Списки отображаются строками');
+        check(!$('.chips', row('domain-list1')), 'Строка по умолчанию свёрнута');
+        $('[data-action="group-row-toggle"]', row('domain-list1')).click();
+        check($$('.chip', row('domain-list1')).length === 6 && !!$('.route', row('domain-list1')), 'Строка раскрывается и показывает правила и записи');
+        $('.group-add input', row('domain-list1')).value = 'draft.example.com';
+        renderGroups();
+        check($('.group-add input', row('domain-list1')).value === 'draft.example.com', 'Обновление сохраняет незавершённый ввод в строке');
+        for (const name of ['domain-list1', 'domain-list2']) {
+            const box2 = $('[data-action="group-select"]', row(name));
+            box2.checked = true;
+            box2.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+        check(!$('#dns-bulk').hidden && $('#dns-bulk-count').textContent.includes('2') && !$('[data-action="dns-merge"]').disabled,
+              'Выбранные списки показывают панель объединения');
+        $('[data-action="dns-merge"]').click();
+        const mergeForm = $('#dns-merge-form');
+        check(!!mergeForm && $$('input[name=target]', mergeForm).length === 2 && $('.notice b', mergeForm).textContent === '10',
+              'Окно объединения показывает выбранные списки и итоговое число записей');
+        mergeForm.querySelector('input[value="domain-list2"]').click();
+        check(mergeForm.title.value === 'Список 2', 'Название берётся из выбранного основного списка');
+        mergeForm.requestSubmit();
+        for (let n = 0; n < 25 && $('#dns-merge-form'); n++) await tick();
+        const mergeCall = window.dnsTestRequests.find((r) => r.url === '/api/router/groups/merge');
+        check(mergeCall?.payload.target === 'domain-list2' && JSON.stringify(mergeCall.payload.sources) === '["domain-list1"]'
+              && !state.groupSelected.size && $$('.glist-row', box).length === 2, 'Объединение отправляет основной и удаляемые списки');
+        actions['dns-view']({dataset: {view: 'cards'}});
+        check(!!$('.group', box) && !$('.glist', box) && storage('s4r-dns-view') === 'cards', 'Можно вернуться к карточкам');
 
         const params = new URLSearchParams(location.search);
         if (params.has('preview')) {

@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='updates-ui-') as data:
             page=browser.new_page(viewport={'width':1440,'height':1000})
             errors=[]; page.on('pageerror',lambda e:errors.append(str(e)))
             page.route('**/*',lambda route:route.continue_() if route.request.url.startswith(url+'/') else route.abort())
-            metadata=release('v2.4.7'); metadata['body']='<img src=x onerror=alert(1)> Тестовое описание'
+            metadata=release('v2.4.7'); metadata['body']='<img src=x onerror=alert(1)> Тестовое описание\n\n- **Жирный** пункт\n- `код` и [ссылка](https://example.com)\n\n[плохая](javascript:alert(1))'
             app.updates=UpdateManager('2.4.6',data,session=Session(Response(data=metadata),Response(content=DATA)))
             page.goto(url,wait_until='networkidle')
             page.locator('#updates-button').click()
@@ -31,7 +31,10 @@ with tempfile.TemporaryDirectory(prefix='updates-ui-') as data:
             assert page.locator('#updates-button').evaluate('(e)=>e.classList.contains("has-update")')
             assert page.locator('.update-notes img').count()==0
             assert '<img' in page.locator('.update-notes').inner_text()
-            checked.extend(['available badge','escaped notes','early manual check'])
+            notes=page.locator('.update-notes')
+            assert notes.locator('li').count()==2 and notes.locator('b').inner_text()=='Жирный' and notes.locator('code').inner_text()=='код'
+            assert notes.locator('a[href="https://example.com"]').count()==1 and notes.locator('a[href^="javascript"]').count()==0
+            checked.extend(['available badge','escaped notes','markdown notes','early manual check'])
             page.get_by_role('button',name='Скачать обновление',exact=True).click()
             page.get_by_text('Файл скачан. Размер и SHA-256 подтверждены.',exact=True).wait_for()
             assert page.get_by_role('button',name='Обновить и перезапустить',exact=True).count()==0

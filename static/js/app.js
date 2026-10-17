@@ -275,6 +275,9 @@ const state = {
     loadingGroups: false,
     expanded: new Set(),
     fresh: new Map(),       // имя списка -> Set недавно добавленных записей
+    dnsView: storage('s4r-dns-view') === 'list' ? 'list' : 'cards',
+    listOpen: new Set(),    // раскрытые строки в виде «списком»
+    groupSelected: new Set(),
     ipRoutes: null,
     ipLoading: false,
     ipError: '',
@@ -457,6 +460,16 @@ function renderGroups() {
     const box = $('#groups');
     const q = searchQuery();
     renderStats();
+    $$('[data-action="dns-view"]').forEach((b) => {
+        b.classList.toggle('active', b.dataset.view === state.dnsView);
+        b.setAttribute('aria-pressed', String(b.dataset.view === state.dnsView));
+    });
+    const alive = new Set(state.groups.map((g) => g.name));
+    state.groupSelected = new Set([...state.groupSelected].filter((n) => alive.has(n)));
+    const nSel = state.groupSelected.size;
+    $('#dns-bulk').hidden = !nSel || !state.connected;
+    $('#dns-bulk-count').textContent = `Выбрано списков: ${nSel}`;
+    $('[data-action="dns-merge"]').disabled = nSel < 2;
 
     if (!state.settings?.has_password || (!state.connected && !state.groups.length && !state.loadingGroups)) {
         const needSetup = !state.settings?.has_password;
@@ -490,8 +503,47 @@ function renderGroups() {
         return;
     }
 
-    renderGroupCards(box, q);
+    if (state.dnsView === 'list') renderGroupList(box, q);
+    else renderGroupCards(box, q);
     renderSearchHint(q);
+}
+
+/** Вид «списком»: строка на список, записи и правила раскрываются по клику. */
+function renderGroupList(box, q) {
+    const drafts = new Map($$('.glist-row', box).map((row) => [row.dataset.name, $('.group-add input', row)?.value || '']));
+    if (!$('.glist', box)) box.innerHTML = '';
+    box.dataset.cols = '';
+    renderHtml(box, `<div class="glist card" data-render-key="glist">${state.groups.map((g) => groupRow(g, q)).join('')}</div>`);
+    for (const row of $$('.glist-row', box)) {
+        const input = $('.group-add input', row);
+        const draft = drafts.get(row.dataset.name);
+        if (input && draft && document.activeElement !== input) input.value = draft;
+    }
+}
+
+function groupRow(g, q) {
+    const hits = q ? g.entries.filter((e) => e.includes(q) || covers(e, q)) : [];
+    const dim = q && !hits.length && !g.title.toLowerCase().includes(q);
+    const open = state.listOpen.has(g.name) || (q && hits.length > 0);
+    const pct = Math.min(100, Math.round((g.count / g.limit) * 100));
+    const sel = state.groupSelected.has(g.name);
+    const ifaces = g.routes.length
+        ? g.routes.map((r) => `<button class="glist-iface${r.enabled ? '' : ' off'}" data-action="route-move" data-group="${esc(g.name)}" data-iface="${esc(r.interface)}" title="${esc(r.interface_title)}${r.enabled ? '' : ' (правило выключено)'} — сменить подключение"><span class="dot${r.interface_up ? ' up' : ''}"></span><span>${esc(r.interface_title)}</span></button>`).join('')
+        : `<button class="glist-iface none" data-action="route-new" data-group="${esc(g.name)}" title="Нет правила — домены никуда не направляются">${ICONS.info}<span>Нет правила</span></button>`;
+    return `
+    <article class="glist-row${open ? ' open' : ''}${dim ? ' dim' : ''}${q && hits.length ? ' match' : ''}${sel ? ' selected' : ''}" data-name="${esc(g.name)}" data-render-key="glist:${esc(g.name)}">
+        <div class="glist-head">
+            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать для объединения" aria-label="Выбрать «${esc(g.title)}»">
+            <button class="glist-toggle" data-action="group-row-toggle" data-group="${esc(g.name)}" aria-expanded="${open}" title="${open ? 'Свернуть' : 'Показать записи и правила'}">
+                <svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>${groupIcon(g.title)}
+                <span class="glist-title"><b>${esc(g.title)}</b><small>${g.count} из ${g.limit}${q && hits.length ? ` · найдено: ${hits.length}` : ''}</small></span>
+            </button>
+            <span class="meter ${pct >= 100 ? 'full' : pct >= 85 ? 'warn' : ''}" title="${g.count} из ${g.limit}"><i style="width:${pct}%"></i></span>
+            <div class="glist-ifaces">${ifaces}</div>
+            ${groupMenu(g)}
+        </div>
+        ${open ? `<div class="glist-body">${groupBody(g, q)}</div>` : ''}
+    </article>`;
 }
 
 /** Обновляем списки на месте, сохраняя колонки, прокрутку и незавершённый ввод. */
@@ -590,14 +642,22 @@ function entryNote(g, e) {
     return null;
 }
 
-function groupCard(g, q) {
+function groupMenu(g) {
+    return `
+            <div class="group-menu">
+                ${g.routes.length ? `<button class="icon-btn sm plain" data-action="route-new" data-group="${esc(g.name)}" title="Добавить ещё правило">${ICONS.plus}</button>` : ''}
+                <button class="icon-btn sm plain" data-action="group-edit" data-group="${esc(g.name)}" title="Редактировать списком">${ICONS.edit}</button>
+                <button class="icon-btn sm plain" data-action="group-copy" data-group="${esc(g.name)}" title="Копировать все записи">${ICONS.copy}</button>
+                <button class="icon-btn sm plain" data-action="group-export" data-group="${esc(g.name)}" title="Скачать .txt">${ICONS.download}</button>
+                <button class="icon-btn sm plain danger" data-action="group-delete" data-group="${esc(g.name)}" title="Удалить список">${ICONS.trash}</button>
+            </div>`;
+}
+
+/** Правила, записи и поле добавления - общие для карточки и строки списка. */
+function groupBody(g, q) {
     const expanded = state.expanded.has(g.name);
     const fresh = state.fresh.get(g.name) || new Set();
     const hits = q ? g.entries.filter((e) => e.includes(q) || covers(e, q)) : [];
-    const dim = q && !hits.length && !g.title.toLowerCase().includes(q);
-    const pct = Math.min(100, Math.round((g.count / g.limit) * 100));
-    const meterCls = pct >= 100 ? 'full' : pct >= 85 ? 'warn' : '';
-    const redundant = g.entries.filter((e) => entryNote(g, e)?.cls === 'redundant').length;
 
     let shown = g.entries;
     if (q && hits.length) shown = hits;
@@ -633,8 +693,29 @@ function groupCard(g, q) {
             <button class="btn sm primary" data-action="route-new" data-group="${esc(g.name)}">Направить</button></div>`;
 
     return `
-    <article class="group card${dim ? ' dim' : ''}${q && hits.length ? ' match' : ''}${expanded ? ' expanded' : ''}" data-name="${esc(g.name)}">
+        <div class="routes">${routes}</div>
+        <div class="chips">${chips}</div>
+        ${hidden > 0 && !q ? `<button class="chips-more" data-action="group-expand" data-group="${esc(g.name)}">Показать ещё ${hidden}</button>` : ''}
+        ${expanded && !q && g.entries.length > CHIP_LIMIT ? `<button class="chips-more" data-action="group-expand" data-group="${esc(g.name)}">Свернуть</button>` : ''}
+        <form class="group-add" data-render-key="add" data-group="${esc(g.name)}">
+            <input type="text" placeholder="Добавить домен, URL или IP…" title="Можно вставить сразу несколько — через пробел, запятую или с новой строки" autocomplete="off" spellcheck="false">
+            <button class="btn sm primary" type="submit">${ICONS.plus}</button>
+        </form>`;
+}
+
+function groupCard(g, q) {
+    const expanded = state.expanded.has(g.name);
+    const hits = q ? g.entries.filter((e) => e.includes(q) || covers(e, q)) : [];
+    const dim = q && !hits.length && !g.title.toLowerCase().includes(q);
+    const pct = Math.min(100, Math.round((g.count / g.limit) * 100));
+    const meterCls = pct >= 100 ? 'full' : pct >= 85 ? 'warn' : '';
+    const redundant = g.entries.filter((e) => entryNote(g, e)?.cls === 'redundant').length;
+    const sel = state.groupSelected.has(g.name);
+
+    return `
+    <article class="group card${dim ? ' dim' : ''}${q && hits.length ? ' match' : ''}${expanded ? ' expanded' : ''}${sel ? ' selected' : ''}" data-name="${esc(g.name)}">
         <div class="group-head">
+            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать для объединения" aria-label="Выбрать «${esc(g.title)}»">
             ${groupIcon(g.title)}
             <div class="group-title">
                 <h2 data-action="group-rename" data-group="${esc(g.name)}" title="${esc(g.title)} — нажмите, чтобы переименовать">${esc(g.title)}</h2>
@@ -644,22 +725,9 @@ function groupCard(g, q) {
                     ${redundant ? `<button class="link-btn" data-action="group-clean" data-group="${esc(g.name)}" title="Записи, которые уже покрываются другими доменами этого списка">убрать лишние: ${redundant}</button>` : ''}
                 </div>
             </div>
-            <div class="group-menu">
-                ${g.routes.length ? `<button class="icon-btn sm plain" data-action="route-new" data-group="${esc(g.name)}" title="Добавить ещё правило">${ICONS.plus}</button>` : ''}
-                <button class="icon-btn sm plain" data-action="group-edit" data-group="${esc(g.name)}" title="Редактировать списком">${ICONS.edit}</button>
-                <button class="icon-btn sm plain" data-action="group-copy" data-group="${esc(g.name)}" title="Копировать все записи">${ICONS.copy}</button>
-                <button class="icon-btn sm plain" data-action="group-export" data-group="${esc(g.name)}" title="Скачать .txt">${ICONS.download}</button>
-                <button class="icon-btn sm plain danger" data-action="group-delete" data-group="${esc(g.name)}" title="Удалить список">${ICONS.trash}</button>
-            </div>
+            ${groupMenu(g)}
         </div>
-        <div class="routes">${routes}</div>
-        <div class="chips">${chips}</div>
-        ${hidden > 0 && !q ? `<button class="chips-more" data-action="group-expand" data-group="${esc(g.name)}">Показать ещё ${hidden}</button>` : ''}
-        ${expanded && !q && g.entries.length > CHIP_LIMIT ? `<button class="chips-more" data-action="group-expand" data-group="${esc(g.name)}">Свернуть</button>` : ''}
-        <form class="group-add" data-render-key="add" data-group="${esc(g.name)}">
-            <input type="text" placeholder="Добавить домен, URL или IP…" title="Можно вставить сразу несколько — через пробел, запятую или с новой строки" autocomplete="off" spellcheck="false">
-            <button class="btn sm primary" type="submit">${ICONS.plus}</button>
-        </form>
+        ${groupBody(g, q)}
     </article>`;
 }
 
@@ -889,6 +957,53 @@ function openRouteCreate(name) {
                         });
                         close();
                         toast('Правило добавлено', 'success');
+                        await loadOverview({ quiet: true });
+                    } catch (err) {
+                        toast(err.message, 'error');
+                    }
+                });
+            };
+        },
+    });
+}
+
+/** Объединение выбранных DNS-списков: записи - в один список, остальные удаляются. */
+function openDnsMerge() {
+    const groups = state.groups.filter((g) => state.groupSelected.has(g.name));
+    if (groups.length < 2) return toast('Отметьте хотя бы два списка', 'info');
+    const best = [...groups].sort((a, b) => b.routes.length - a.routes.length || b.count - a.count)[0];
+    const total = new Set(groups.flatMap((g) => g.entries)).size;
+    const over = total > state.limit;
+    openModal({
+        title: `Объединить ${groups.length} ${plural(groups.length, 'список', 'списка', 'списков')}`,
+        body: `
+            <form id="dns-merge-form">
+                <p>Все записи окажутся в одном списке, остальные списки удалятся. Повторяющиеся записи не дублируются.</p>
+                <div class="modes">${groups.map((g) => `
+                    <label><input type="radio" name="target" value="${esc(g.name)}" ${g === best ? 'checked' : ''}><div><b>${esc(g.title)}</b>
+                        <small>${g.count} ${plural(g.count, 'запись', 'записи', 'записей')} · ${g.routes.map((r) => esc(r.interface_title)).join(', ') || 'без правила'}</small></div></label>`).join('')}
+                </div>
+                <label class="field"><span>Название объединённого списка</span><input type="text" name="title" value="${esc(best.title)}" required></label>
+                <div class="notice${over ? ' danger' : ''}">${ICONS.info}<div>В объединённом списке будет <b>${total}</b> ${plural(total, 'запись', 'записи', 'записей')} из ${state.limit} возможных.${over ? ' Это больше, чем принимает Keenetic, — выберите меньше списков.' : ' Правила удаляемых списков на другие подключения перейдут в объединённый список.'}</div></div>
+            </form>`,
+        foot: `<button class="btn ghost" data-close>Отмена</button>
+               <button class="btn primary" type="submit" form="dns-merge-form" ${over ? 'disabled' : ''}>Объединить</button>`,
+        onMount: ({ el, close }) => {
+            const f = $('form', el);
+            f.addEventListener('change', (e) => {
+                if (e.target.name === 'target') f.title.value = findGroup(e.target.value)?.title || f.title.value;
+            });
+            f.onsubmit = async (e) => {
+                e.preventDefault();
+                const target = f.target.value;
+                await withButton($('.modal-foot .primary', el), async () => {
+                    try {
+                        const res = await api('/api/router/groups/merge', 'POST', {
+                            target, title: f.title.value.trim(), sources: groups.map((g) => g.name).filter((n) => n !== target),
+                        });
+                        toast(res.message, 'success');
+                        state.groupSelected.clear();
+                        close();
                         await loadOverview({ quiet: true });
                     } catch (err) {
                         toast(err.message, 'error');
@@ -1505,6 +1620,8 @@ function renderIpRoutes() {
     const n = state.ipSelected.size;
     $('#ip-bulk').hidden = !n;
     $('#ip-bulk-count').textContent = `Выбрано: ${n}`;
+    $('#ip-merge-btn').hidden = ipGroups(all.filter((r) => state.ipSelected.has(r.index))).length < 2;
+    $('#ip-collapse-all').hidden = true;
     box.setAttribute('aria-busy', String(state.ipLoading));
     $('[data-action="ip-reload"]').disabled = state.ipLoading || state.overviewLoading;
 
@@ -1543,6 +1660,13 @@ function renderIpRoutes() {
         return;
     }
     empty.hidden = true;
+    const allCollapsed = groups.every((g) => collapsed.has(ckey(g.comment)));
+    const toggleAll = $('#ip-collapse-all');
+    toggleAll.hidden = groups.length < 2 || !!q;
+    toggleAll.dataset.collapse = allCollapsed ? '0' : '1';
+    toggleAll.innerHTML = allCollapsed
+        ? '<svg viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>Развернуть все'
+        : '<svg viewBox="0 0 24 24"><path d="m7 15 5-5 5 5"/></svg>Свернуть все';
 
     renderHtml(box, groups.map((g) => {
         const key = g.comment;
@@ -1607,6 +1731,57 @@ async function setIpEnabled(indices, enabled) {
         toast(e.message, 'error');
     }
     renderIpRoutes();
+}
+
+/** Объединение IP-групп: выбранные маршруты получают одно описание. */
+function openIpMerge() {
+    const routes = (state.ipRoutes || []).filter((r) => state.ipSelected.has(r.index));
+    const groups = ipGroups(routes);
+    if (groups.length < 2) return toast('Отметьте маршруты хотя бы из двух групп', 'info');
+    const totals = new Map(ipGroups().map((g) => [ckey(g.comment), g.routes.length]));
+    const best = [...groups].sort((a, b) => (!a.comment) - (!b.comment) || b.routes.length - a.routes.length)[0];
+    openModal({
+        title: `Объединить ${groups.length} ${plural(groups.length, 'группу', 'группы', 'групп')}`,
+        body: `
+            <form id="ip-merge-form">
+                <p>Выбранные маршруты (${routes.length}) получат одно описание и окажутся в одной группе. Адреса и подключения не меняются.</p>
+                <div class="modes">${groups.map((g, i) => {
+                    const all = totals.get(ckey(g.comment)) || g.routes.length;
+                    return `<label><input type="radio" name="pick" value="${i}" ${g === best ? 'checked' : ''}><div><b>${esc(g.title)}</b>
+                        <small>${g.routes.length === all ? `${all} ${plural(all, 'маршрут', 'маршрута', 'маршрутов')}` : `выбрано ${g.routes.length} из ${all}`}</small></div></label>`;
+                }).join('')}
+                    <label><input type="radio" name="pick" value="new"><div><b>Новое название</b><small>Указать своё описание</small></div></label>
+                </div>
+                <label class="field" data-new-name hidden><span>Описание группы</span><input type="text" name="comment" placeholder="Например: Telegram"></label>
+            </form>`,
+        foot: `<button class="btn ghost" data-close>Отмена</button>
+               <button class="btn primary" type="submit" form="ip-merge-form">Объединить</button>`,
+        onMount: ({ el, close }) => {
+            const f = $('form', el);
+            f.addEventListener('change', () => {
+                const custom = f.pick.value === 'new';
+                $('[data-new-name]', el).hidden = !custom;
+                if (custom) f.comment.focus();
+            });
+            f.onsubmit = async (e) => {
+                e.preventDefault();
+                const comment = f.pick.value === 'new' ? f.comment.value.trim() : groups[+f.pick.value].comment;
+                if (f.pick.value === 'new' && !comment) return toast('Укажите описание группы', 'error');
+                await withButton($('.modal-foot .primary', el), async () => {
+                    try {
+                        const res = await api('/api/router/ip-routes/comment', 'POST', { indices: routes.map((r) => r.index), comment });
+                        toast(`Группы объединены в «${comment || 'Без описания'}» · ${res.message}`, 'success');
+                        state.ipSelected.clear();
+                        close();
+                        invalidateIpRoutes();
+                        await loadIpRoutes();
+                    } catch (err) {
+                        toast(err.message, 'error');
+                    }
+                });
+            };
+        },
+    });
 }
 
 async function setIpComment(indices, current = '') {
@@ -1812,7 +1987,13 @@ const cap = {
     agent: { status: 'off' },
     pointerDown: false,
     refreshPending: false,
+    autoAdd: false,         // сразу добавлять новые адреса на роутер
+    autoIface: '',
+    autoBusy: false,
+    autoDone: new Set(),    // пары «программа + адрес», которые уже отправлялись на роутер
 };
+
+const CAP_ALL = '*';        // результаты всех программ анализа сразу
 
 function capResultState() {
     return { selDomains: new Set(), selIps: new Set(), exact: false, agg24: true,
@@ -1874,6 +2055,11 @@ function capResetSelection(scope = 'live') {
 function capProgramNames() {
     const target = cap.session?.target;
     return [...new Set(target?.apps?.map((a) => a.name) || (target ? [target.name] : []))];
+}
+
+/** Строка результатов относится к программе name (CAP_ALL - к любой). */
+function capBelongs(name, names = capProgramNames()) {
+    return (row) => name === CAP_ALL || (row.apps?.length ? row.apps.includes(name) : names.length === 1);
 }
 
 /** Домен -> основной домен (api.discord.gg -> discord.gg). Та же логика, что на сервере, в упрощённом виде. */
@@ -1960,8 +2146,10 @@ async function pollCapture() {
         try { await window.pywebview?.api?.restore_window?.(); } catch { /* WinAPI также восстанавливает окно */ }
     }
     if (wasRunning && !cap.session?.running) {
+        cap.autoAdd = false;
         try { cap.history = (await api('/api/capture/history')).programs; } catch { /* не критично */ }
     }
+    if (cap.autoAdd) capAutoAdd();
     if (capVisible()) {
         if (!cap.pointerDown) {
             renderCapLive();
@@ -2053,7 +2241,7 @@ function renderCapApps() {
 function renderCapPicked() {
     const box = $('#cap-picked');
     if (box) box.innerHTML = cap.picks.size ? `
-        <p class="cap-note muted">Название каждой программы используется отдельно в истории, DNS-списках и описании IP-маршрутов.</p>
+        <p class="cap-note muted">Название каждой программы используется отдельно в истории, DNS-списках и описании IP-маршрутов. Программы с одинаковым названием (Codex и codex) анализируются как одна: общие результаты, история и списки.</p>
         <div class="cap-picked">${[...cap.picks].map(([key, a]) => `
             <div class="cap-picked-item">
                 ${groupIcon(a.title)}
@@ -2123,9 +2311,10 @@ function capData(scope = 'live') {
     if (scope === 'history') return cap.hist ? { name: cap.hist.name, ips: cap.hist.ips, domains: cap.hist.domains, history: true } : null;
     if (cap.session) {
         const names = capProgramNames();
-        if (!names.includes(cap.program)) cap.program = names[0] || cap.session.target.name;
-        const belongs = (row) => row.apps?.length ? row.apps.includes(cap.program) : names.length === 1;
-        return { name: cap.program, ips: cap.session.results.ips.filter(belongs), domains: cap.session.results.domains.filter(belongs), history: false };
+        if (cap.program === CAP_ALL ? names.length < 2 : !names.includes(cap.program)) cap.program = names[0] || cap.session.target.name;
+        const all = cap.program === CAP_ALL;
+        const belongs = capBelongs(cap.program, names);
+        return { name: all ? names.join(' + ') : cap.program, all, ips: cap.session.results.ips.filter(belongs), domains: cap.session.results.domains.filter(belongs), history: false };
     }
     return null;
 }
@@ -2134,9 +2323,10 @@ function capDomainGroups(data) {
     const map = new Map();
     for (const d of data.domains) {
         const base = baseDomain(d.domain);
-        const g = map.get(base) || { base, names: [], ips: new Set(), queried: false, count: 0 };
+        const g = map.get(base) || { base, names: [], ips: new Set(), apps: new Set(), queried: false, count: 0 };
         g.names.push(d.domain);
         d.ips.forEach((ip) => g.ips.add(ip));
+        (d.apps || []).forEach((a) => g.apps.add(a));
         g.queried = g.queried || d.queried;
         g.count += d.count;
         map.set(base, g);
@@ -2182,15 +2372,16 @@ function renderCapResults(scope) {
     view.selIps = new Set([...view.selIps].filter((i) => ipSet.has(i)));
 
     const head = data.history ? '' : `<div class="cap-section-heading cap-res-head"><div><h2>Результаты ${cap.session?.running ? 'текущего' : 'последнего'} анализа</h2><p class="muted">Выберите программу и отметьте адреса для добавления на роутер.</p></div></div>
-        <div class="cap-programs" role="group" aria-label="Результаты по программе">${capProgramNames().map((name) => {
+        <div class="cap-programs" role="group" aria-label="Результаты по программе">${(capProgramNames().length > 1 ? [CAP_ALL, ...capProgramNames()] : capProgramNames()).map((name) => {
             const target = cap.session.results;
-            const names = capProgramNames();
-            const belongs = (row) => row.apps?.length ? row.apps.includes(name) : names.length === 1;
+            const belongs = capBelongs(name);
             const nDom = capDomainGroups({ domains: target.domains.filter(belongs) }).length;
             const nIp = target.ips.filter(belongs).length;
-            return `<button class="cap-program${cap.program === name ? ' active' : ''}" data-action="cap-program" data-name="${esc(name)}" data-cap-key="program:${esc(name)}" aria-pressed="${cap.program === name}">${groupIcon(name)}<span><b>${esc(name)}</b><small>${nDom} ${plural(nDom, 'домен', 'домена', 'доменов')} · ${nIp} IP</small></span></button>`;
+            const all = name === CAP_ALL;
+            return `<button class="cap-program${all ? ' all' : ''}${cap.program === name ? ' active' : ''}" data-action="cap-program" data-name="${esc(name)}" data-cap-key="program:${esc(name)}" aria-pressed="${cap.program === name}">${all ? `<span class="cap-all-icon">${ICONS.list}</span>` : groupIcon(name)}<span><b>${all ? 'Все программы' : esc(name)}</b><small>${nDom} ${plural(nDom, 'домен', 'домена', 'доменов')} · ${nIp} IP</small></span></button>`;
         }).join('')}</div>`;
 
+    const appTags = (apps) => data.all ? [...apps].map((a) => `<span class="tag cap-app-tag" title="Программа">${esc(a)}</span>`).join('') : '';
     const domRows = groups.map((g) => {
         const covered = domainCoveredBy(g.base);
         const subs = g.names.filter((n) => n !== g.base);
@@ -2200,7 +2391,7 @@ function renderCapResults(scope) {
             <div class="cap-main">
                 <div class="cap-line"><b class="mono">${esc(g.base)}</b>
                     ${g.queried ? '<span class="tag accent" title="Программа сама запрашивала этот домен">запрос программы</span>' : '<span class="tag" title="Домен найден по IP-адресу, к которому подключалась программа. Такой адрес может принадлежать и другим сайтам на том же CDN">по IP</span>'}
-                    ${covered ? `<span class="tag ok" title="Уже маршрутизируется">в списке «${esc(covered.title)}»</span>` : ''}</div>
+                    ${covered ? `<span class="tag ok" title="Уже маршрутизируется">в списке «${esc(covered.title)}»</span>` : ''}${appTags(g.apps)}</div>
                 ${subs.length ? `<div class="cap-sub mono" title="${esc(subs.join('\n'))}">${esc(subs.slice(0, 6).join(', '))}${subs.length > 6 ? ` и ещё ${subs.length - 6}` : ''}</div>` : ''}
             </div>
             <span class="cap-meta" title="${esc([...g.ips].map((ip) => `${ip}${coveredIp(ip) ? ` — ${coveredIp(ip)}` : ''}`).join('\n'))}">${g.ips.size} IP${[...g.ips].some((ip) => coveredIp(ip)) ? ' · есть на роутере' : ''}</span>
@@ -2217,7 +2408,7 @@ function renderCapResults(scope) {
             <div class="cap-main">
                 <div class="cap-line"><b class="mono">${esc(i.ip)}</b>
                     <span class="tag${i.protos.includes('udp') ? ' warn' : ''}">${i.protos.map((p) => p.toUpperCase()).join('+')}${ports ? ` :${ports}` : ''}</span>
-                    ${covered ? `<span class="tag ok">${esc(covered)}</span>` : ''}</div>
+                    ${covered ? `<span class="tag ok">${esc(covered)}</span>` : ''}${appTags(i.apps || [])}</div>
                 <div class="cap-sub">${i.domains.length ? `<span class="mono">${esc(i.domains.slice(0, 3).join(', '))}${i.domains.length > 3 ? '…' : ''}</span>` : '<span class="warn-text">без домена</span>'}
                     <span class="muted"> · ${esc(i.procs.join(', '))}</span></div>
             </div>
@@ -2237,7 +2428,9 @@ function renderCapResults(scope) {
             <button class="icon-btn sm" data-action="cap-search-clear" ${attr} ${view.query ? '' : 'hidden'} title="Очистить поиск" aria-label="Очистить поиск">${ICONS.x}</button>
             <label class="switch-label" title="Скрыть домены и IP, которые уже добавлены на подключённый роутер"><span class="switch"><input type="checkbox" id="${prefix}-newonly" data-cap-option="newOnly" ${attr} ${view.newOnly ? 'checked' : ''} ${state.connected ? '' : 'disabled'}><span></span></span>Только новые</label>
             ${state.connected && state.ipRoutes !== null ? `<span class="tag ok">Уже на роутере: ${coveredIps} IP</span>` : ''}
+            ${waiting ? `<label class="switch-label cap-auto" title="Новые домены и IP сразу добавляются на роутер, если их там ещё нет"><span class="switch"><input type="checkbox" data-action="cap-auto" ${cap.autoAdd ? 'checked' : ''} ${state.connected ? '' : 'disabled'}><span></span></span>Добавлять автоматически</label>` : ''}
         </div>
+        ${waiting && cap.autoAdd ? `<p class="cap-auto-note">${ICONS.bolt}<span>Автодобавление включено: новые домены каждой программы попадают в DNS-список с её названием, IP — в IP-маршруты с её описанием через <b>${esc(ifaceTitle(cap.autoIface))}</b>. Учитываются параметры добавления ниже; то, что уже есть на роутере, пропускается.${cap.autoBusy ? ' <span class="muted">Добавляем…</span>' : ''}</span></p>` : ''}
         <p class="cap-summary muted">${data.history ? 'Сохранённые адреса' : esc(data.name)} · ${allGroups.length} ${plural(allGroups.length, 'домен', 'домена', 'доменов')} · ${data.ips.length} IP${state.connected ? (state.ipRoutes === null ? ' · сведения об IP-маршрутах пока не загружены' : '') : ' · подключите роутер для проверки добавленных адресов'}</p>
         <div class="cap-results">
             <section class="card cap-card" data-cap-key="domain-card">
@@ -2266,7 +2459,8 @@ function renderCapHistory() {
     if (!list.length) { box.innerHTML = ''; return; }
     renderHtml(box, `
         <section class="cap-history-section" aria-label="Сохранённая история">
-            <header class="cap-section-heading"><div><span class="cap-eyebrow">Сохранённые данные</span><h2>История по программам <span class="badge">${list.length}</span></h2><p class="muted">Откройте программу: все её сеансы появятся ниже, под этой строкой.</p></div></header>
+            <header class="cap-section-heading"><div><span class="cap-eyebrow">Сохранённые данные</span><h2>История по программам <span class="badge">${list.length}</span></h2><p class="muted">Откройте программу: все её сеансы появятся ниже, под этой строкой.</p></div>
+                <button class="btn sm ghost cap-history-delete" data-action="cap-hist-delete-all">${ICONS.trash} Удалить всю историю</button></header>
             <div class="card cap-history" data-cap-key="history">
             ${list.map((p) => {
                 const open = cap.histName === p.name;
@@ -2277,7 +2471,7 @@ function renderCapHistory() {
                     </button>
                     ${open ? `<div class="cap-history-detail" id="cap-history-detail" role="region" aria-label="История ${esc(p.name)}" data-cap-key="history-detail:${esc(p.name)}">
                         <div class="cap-archive-head"><div><span class="cap-eyebrow">История программы</span><h3>${esc(p.name)}</h3><p class="muted">${cap.hist ? `${cap.hist.sessions.length} ${plural(cap.hist.sessions.length, 'сеанс', 'сеанса', 'сеансов')} · результаты объединены` : 'Загружаем сохранённые адреса'}</p></div>
-                            <div class="cap-archive-actions"><button class="btn sm ghost" data-action="cap-hist-refresh" ${cap.histLoading ? 'disabled' : ''}>${ICONS.refresh} Обновить</button><button class="btn sm ghost cap-history-delete" data-action="cap-hist-delete" data-name="${esc(p.name)}">${ICONS.trash} Удалить историю</button><button class="icon-btn" data-action="cap-hist-close" title="Свернуть историю" aria-label="Свернуть историю ${esc(p.name)}">${ICONS.x}</button></div>
+                            <div class="cap-archive-actions"><button class="btn sm ghost" data-action="cap-hist-refresh" ${cap.histLoading ? 'disabled' : ''}>${ICONS.refresh} Обновить</button><button class="btn sm ghost cap-history-delete" data-action="cap-hist-delete" data-name="${esc(p.name)}">${ICONS.trash} Удалить историю</button></div>
                         </div>
                         ${cap.histError ? `<div class="notice cap-history-error">${ICONS.info}<span>${esc(cap.histError)}</span><button class="btn sm ghost" data-action="cap-hist-refresh">Повторить</button></div>` : ''}
                         ${cap.histLoading && !cap.hist ? '<div class="skeleton" style="height:180px" aria-label="Загрузка истории"></div>' : ''}
@@ -2296,8 +2490,13 @@ async function startCapture(btn) {
     let payload;
     if (cap.source === 'running') {
         if (!cap.picks.size) return toast('Выберите одну или несколько программ', 'error');
-        const apps = [...cap.picks].map(([key, app]) => ({ name: (cap.names.get(key) || app.title).trim(), folder: app.folder, pids: app.pids }));
-        if (new Set(apps.map((a) => a.name.toLowerCase())).size !== apps.length) return toast('Названия программ должны различаться — у каждой своя история', 'error');
+        // Одинаковое название без учёта регистра - одна программа; написание берём из истории, если она есть.
+        const spelling = new Map((cap.history || []).map((p) => [p.name.toLowerCase(), p.name]));
+        const apps = [...cap.picks].map(([key, app]) => {
+            const name = (cap.names.get(key) || app.title).trim();
+            if (!spelling.has(name.toLowerCase())) spelling.set(name.toLowerCase(), name);
+            return { name: spelling.get(name.toLowerCase()), folder: app.folder, pids: app.pids };
+        });
         payload = { apps };
     } else {
         cap.exe = ($('#cap-exe').value || '').trim().replace(/^"|"$/g, '');
@@ -2314,6 +2513,8 @@ async function startCapture(btn) {
             cap.query = '';
             cap.selDomains.clear();
             cap.selIps.clear();
+            cap.autoAdd = false;
+            cap.autoDone.clear();
             renderCapture();
             scheduleCapPoll();
             if (full && ['pending', 'starting'].includes(cap.agent.status)) toast('Анализ начат. Подтвердите запрос прав администратора в окне Windows', 'info');
@@ -2352,6 +2553,96 @@ function closeCapHistory() {
     cap.histLoading = false;
     cap.histError = '';
     renderCapHistory();
+}
+
+/**
+ * Автодобавление во время анализа: новые домены каждой программы - в DNS-список с её
+ * названием (создаётся при необходимости), IPv4 - в IP-маршруты с её описанием.
+ * Уже маршрутизируемое и уже отправленное в этом анализе пропускается.
+ */
+async function capAutoAdd() {
+    if (!cap.autoAdd || cap.autoBusy || !cap.session?.running || !state.connected) return;
+    cap.autoBusy = true;
+    const report = [], errors = [];
+    let created = false, ipChanged = false;
+    try {
+        await ensureIpRoutes();
+        const names = capProgramNames();
+        const { domains, ips } = cap.session.results;
+        for (const name of names) {
+            const belongs = capBelongs(name, names);
+            const groups = capDomainGroups({ domains: domains.filter(belongs) });
+            const fresh = (list) => [...new Set(list)].filter((x) => !cap.autoDone.has(`${name}\n${x}`));
+            const entries = fresh(cap.exact ? groups.flatMap((g) => g.names) : groups.map((g) => g.base)).filter((e) => !domainCoveredBy(e));
+            let found = ips.filter(belongs).map((i) => i.ip).filter((ip) => isIpv4(ip) && !ipCoveredBy(ip));
+            if (cap.agg24) found = found.map((ip) => ip.split('.').slice(0, 3).join('.') + '.0/24');
+            const dests = fresh(found);
+            [...entries, ...dests].forEach((x) => cap.autoDone.add(`${name}\n${x}`));
+            const done = [];
+            if (entries.length) {
+                try {
+                    const g = state.groups.find((x) => ckey(x.title) === ckey(name));
+                    if (g) applyGroup((await api(`/api/router/groups/${encodeURIComponent(g.name)}/entries`, 'POST', { entries: entries.join('\n') })).group);
+                    else {
+                        await api('/api/router/groups', 'POST', { title: name, entries: entries.join('\n'), interface: cap.autoIface, auto: true, reject: false });
+                        created = true;
+                    }
+                    done.push(`${entries.length} ${plural(entries.length, 'домен', 'домена', 'доменов')}`);
+                } catch (e) { errors.push(`${name}: ${e.message}`); }
+            }
+            if (dests.length) {
+                try {
+                    const res = await api('/api/router/ip-routes', 'POST', { destinations: dests, interface: cap.autoIface, comment: name });
+                    ipChanged = true;
+                    if (res.added) done.push(`${res.added} IP`);
+                } catch (e) { errors.push(`${name}: ${e.message}`); }
+            }
+            if (done.length) report.push(`${name} — ${done.join(', ')}`);
+        }
+        if (created) await loadOverview({ quiet: true });
+        else if (report.length) renderGroups();
+        if (ipChanged) { invalidateIpRoutes(); await ensureIpRoutes(); }
+    } catch (e) {
+        errors.push(e.message);
+    } finally {
+        cap.autoBusy = false;
+    }
+    if (report.length) toast(`Добавлено автоматически: ${report.join('; ')}`, 'success');
+    if (errors.length) toast(`Автодобавление: ${errors.join('; ')}`, 'error');
+    if (capVisible()) renderCapResults('live');
+}
+
+/** Включение автодобавления: выбор подключения и подтверждение. true - включить. */
+function openCapAuto() {
+    return new Promise((resolve) => {
+        let ok = false;
+        openModal({
+            title: 'Добавлять адреса автоматически',
+            size: 'sm',
+            body: `
+                <p>Пока идёт анализ, новые адреса сразу попадают на роутер:</p>
+                <ul class="cap-auto-list">
+                    <li>домены — в DNS-список с названием программы (если списка нет, он создаётся);</li>
+                    <li>IP — в IP-маршруты с описанием по названию программы.</li>
+                </ul>
+                <p class="muted">Домены и IP, которые уже маршрутизируются, пропускаются. Учитываются параметры «Добавлять отдельные поддомены» и «Объединять IP в подсети /24».</p>
+                <form id="cap-auto-form"><label class="field"><span>Направлять через</span><select name="interface" required>${ifaceOptions(cap.autoIface)}</select></label></form>`,
+            foot: `<button class="btn ghost" data-close>Отмена</button>
+                   <button class="btn primary" type="submit" form="cap-auto-form">Включить</button>`,
+            onMount: ({ el, close }) => {
+                $('form', el).onsubmit = (e) => {
+                    e.preventDefault();
+                    const iface = e.target.interface.value;
+                    if (!iface) return toast('Выберите подключение', 'error');
+                    cap.autoIface = iface;
+                    ok = true;
+                    close();
+                };
+                new MutationObserver((_, obs) => { if (!el.isConnected) { obs.disconnect(); resolve(ok); } })
+                    .observe($('#modal-root'), { childList: true });
+            },
+        });
+    });
 }
 
 function capAddDomains(scope = 'live') {
@@ -2581,6 +2872,24 @@ const actions = {
         renderGroups();
     },
     'group-copy': (el) => copyText(findGroup(el.dataset.group).entries.join('\n')),
+    'dns-view'(el) {
+        if (state.dnsView === el.dataset.view) return;
+        state.dnsView = el.dataset.view;
+        storage('s4r-dns-view', state.dnsView);
+        $('#groups').innerHTML = '';
+        renderGroups();
+    },
+    'group-row-toggle'(el) {
+        const n = el.dataset.group;
+        state.listOpen.has(n) ? state.listOpen.delete(n) : state.listOpen.add(n);
+        renderGroups();
+    },
+    'group-select'(el) {
+        el.checked ? state.groupSelected.add(el.dataset.group) : state.groupSelected.delete(el.dataset.group);
+        renderGroups();
+    },
+    'dns-clear-selection'() { state.groupSelected.clear(); renderGroups(); },
+    'dns-merge': () => openDnsMerge(),
     'group-export': (el) => {
         const g = findGroup(el.dataset.group);
         downloadText(`${g.title.replace(/[\\/:*?"<>|]+/g, '_')}.txt`, g.entries.join('\n') + '\n');
@@ -2620,6 +2929,11 @@ const actions = {
     },
 
     'ip-move-selected': () => openIpMove([...state.ipSelected]),
+    'ip-merge-selected': () => openIpMerge(),
+    'ipg-collapse-all'(el) {
+        storage('s4r-ip-collapsed', JSON.stringify(el.dataset.collapse === '1' ? ipGroups().map((g) => ckey(g.comment)) : []));
+        renderIpRoutes();
+    },
     'ip-comment-selected': () => setIpComment([...state.ipSelected]),
     'ip-export-selected': () => {
         const dests = new Set(state.ipRoutes.filter((r) => state.ipSelected.has(r.index)).map((r) => r.destination));
@@ -2729,6 +3043,7 @@ const actions = {
             try {
                 cap.session = (await api('/api/capture/stop', 'POST', {})).session;
                 cap.agent = cap.session?.agent || cap.agent;
+                cap.autoAdd = false;
                 cap.history = (await api('/api/capture/history')).programs;
                 const r = cap.session?.results;
                 const n = r ? capDomainGroups(r).length : 0;
@@ -2764,7 +3079,27 @@ const actions = {
         renderCapResults();
     },
     'cap-setup-close'() { cap.setup = false; renderCapture(); },
-    'cap-hist-close': () => closeCapHistory(),
+    async 'cap-auto'(el) {
+        if (!el.checked) {
+            cap.autoAdd = false;
+            renderCapResults('live');
+            return;
+        }
+        el.checked = false;
+        if (!state.connected) return openSettings();
+        if (!await openCapAuto()) return;
+        cap.autoAdd = true;
+        renderCapResults('live');
+        capAutoAdd();
+    },
+    async 'cap-hist-delete-all'() {
+        const n = (cap.history || []).length;
+        const running = cap.session?.running;
+        if (!await confirmDialog(`Удалить всю историю анализа (${n} ${plural(n, 'программа', 'программы', 'программ')})?${running ? ' Текущий анализ продолжится и сохранится.' : ''} На роутере ничего не изменится.`, { ok: 'Удалить всё' })) return;
+        await task('Удаление истории…', () => api('/api/capture/history/delete', 'POST', {}));
+        cap.history = (await api('/api/capture/history')).programs;
+        closeCapHistory();
+    },
     'cap-hist-refresh': () => cap.histName && openCapHistory(cap.histName, { force: true }),
     async 'cap-hist-delete'(el) {
         const name = el.dataset.name;

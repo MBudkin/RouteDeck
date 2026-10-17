@@ -63,6 +63,14 @@ class HistoryTests(unittest.TestCase):
         # Миграция при следующем запуске не должна восстановить удалённую программу.
         self.assertEqual([p['name'] for p in CaptureStore(self.db).programs()], ['Code'])
 
+    def test_delete_all_keeps_running_session(self):
+        running = self.store.create_session('Code', {'apps': [{'name': 'Code'}]}, 'basic', '2026-10-05')
+        self.store.save_results(running, {'ips': results()['ips'][1:2], 'domains': []}, 'basic')
+        self.assertEqual(self.store.delete_all(keep_session=running), 1)
+        self.assertEqual([(p['name'], p['sessions']) for p in self.store.programs()], [('Code', 1)])
+        self.assertEqual(self.store.delete_all(), 1)
+        self.assertEqual(self.store.programs(), [])
+
     def test_delete_last_program_removes_session(self):
         self.store.delete_program('Discord')
         self.store.delete_program('Code')
@@ -134,10 +142,11 @@ class ManagerTests(unittest.TestCase):
             apps = CaptureManager._parse_apps({'exe': r'C:\Apps\Discord\Discord.exe', 'name': 'Мой Discord'})
         self.assertEqual(apps[0].name, 'Мой Discord')
 
-    def test_rejects_duplicate_names(self):
+    def test_same_name_in_other_case_is_one_program(self):
         with patch('services.capture.session.winapi.process_details', return_value=('', 0)):
-            with self.assertRaisesRegex(ValueError, 'отдельное название'):
-                CaptureManager._parse_apps({'apps': [{'name': 'Code', 'pids': [1]}, {'name': 'code', 'pids': [2]}]})
+            apps = CaptureManager._parse_apps({'apps': [{'name': 'Codex', 'pids': [1]}, {'name': 'codex', 'pids': [2]}]})
+        self.assertEqual([a.name for a in apps], ['Codex', 'Codex'])
+        self.assertEqual(CaptureStore._names(Target('Codex', apps).to_dict(), 'Codex'), ['Codex'])
 
     def test_process_events_keep_program_ownership(self):
         with tempfile.TemporaryDirectory() as tmp, \

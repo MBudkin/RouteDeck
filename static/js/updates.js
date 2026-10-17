@@ -23,6 +23,54 @@ function notifyUpdate() {
           { timeout: 20000, onClick: openUpdates });
 }
 
+/**
+ * Описание релиза с GitHub в Markdown -> безопасный HTML. Текст сначала экранируется,
+ * затем размечаются заголовки, списки, цитаты, код, **жирный**, *курсив* и ссылки http(s).
+ */
+function markdown(text) {
+    const inline = (s) => {
+        const codes = [];
+        s = esc(s).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+        s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+            .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>')
+            .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => `<b>${a ?? b}</b>`)
+            .replace(/(^|[^*\w])\*(?!\s)(.+?)\*(?!\w)/g, '$1<i>$2</i>')
+            .replace(/~~(.+?)~~/g, '<s>$1</s>');
+        return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+    };
+    const out = [];
+    let para = [], list = null, code = null;
+    const flush = () => {
+        if (para.length) out.push(`<p>${para.map(inline).join('<br>')}</p>`);
+        if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join('')}</${list.tag}>`);
+        para = []; list = null;
+    };
+    for (const line of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+        if (code) {
+            if (/^\s*```/.test(line)) { out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`); code = null; }
+            else code.push(line);
+            continue;
+        }
+        if (/^\s*```/.test(line)) { flush(); code = []; continue; }
+        const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+        const item = line.match(/^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+        if (!line.trim()) flush();
+        else if (heading) { flush(); const n = Math.min(6, heading[1].length + 3); out.push(`<h${n}>${inline(heading[2])}</h${n}>`); }
+        else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flush(); out.push('<hr>'); }
+        else if (/^\s*>/.test(line)) { flush(); out.push(`<blockquote>${inline(line.replace(/^\s*>\s?/, ''))}</blockquote>`); }
+        else if (item) {
+            const tag = item[2] ? 'ol' : 'ul';
+            if (para.length || (list && list.tag !== tag)) flush();
+            list ??= { tag, items: [] };
+            list.items.push(item[3]);
+        } else if (list && /^\s{2,}\S/.test(line)) list.items[list.items.length - 1] += ' ' + line.trim();
+        else { if (list) flush(); para.push(line.trim()); }
+    }
+    if (code) out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`);
+    flush();
+    return out.join('');
+}
+
 function updateBody() {
     const d = updateUI.data;
     if (!d) return '<p class="muted">Проверяем обновления…</p>';
@@ -37,7 +85,7 @@ function updateBody() {
     const native = Boolean(d.can_install && window.pywebview?.api?.install_update);
     return `<div class="update-summary"><span class="update-symbol">${ICONS.download}</span><div><h3>${esc(headline)}</h3><p class="muted">Установлена версия ${esc(d.current_version)}${d.checked_at ? ` · Проверено ${esc(new Date(d.checked_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'}))}` : ''}</p></div></div>
         ${d.error ? `<p class="update-error" role="status">${esc(d.error.message)}</p>` : ''}
-        ${r && available ? `<div class="update-notes">${esc(r.notes || 'Описание изменений доступно на GitHub.')}</div><p class="muted">Windows EXE · ${(r.size/1048576).toFixed(1)} МБ · проверка SHA-256</p>` : ''}
+        ${r && available ? `<div class="update-notes">${markdown(r.notes || 'Описание изменений доступно на GitHub.')}</div><p class="muted">Windows EXE · ${(r.size/1048576).toFixed(1)} МБ · проверка SHA-256</p>` : ''}
         ${downloading ? `<div class="update-progress"><progress value="${progress}" max="100"></progress><span>${progress}%</span></div><p class="muted">Проверяем файл после скачивания. Приложение продолжает работать.</p>` : ''}
         ${download.error ? `<p class="update-error" role="status">${esc(download.error.message)}</p>` : ''}
         ${ready ? '<p class="update-ready">Файл скачан. Размер и SHA-256 подтверждены.</p>' : ''}

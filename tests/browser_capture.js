@@ -22,6 +22,7 @@ window.fetch = async (url, opts = {}) => {
                       {domain: 'archive.example.net', queried: true, ips: [], apps: [name], count: 1}],
             ips: [{ip: name === 'Discord' ? '8.8.8.8' : '13.107.6.158', apps: [name], domains: [], protos: ['udp'], ports: [443], procs: ['archive.exe'], count: 1}]});
     }
+    else if (url === '/api/capture/history/delete') testHistory.splice(0);
     else if (url === '/api/capture/program/delete') {
         const index = testHistory.findIndex((h) => h.name === payload.name);
         if (index !== -1) testHistory.splice(index, 1);
@@ -115,6 +116,34 @@ window.addEventListener('load', async () => {
         capAddDomains();
         assert(domainArgs[2] === 'Discord', 'Новый DNS-список получает название выбранной программы');
 
+        const keptSelection = new Set(cap.selDomains);
+        $('[data-action="cap-program"][data-name="*"]').click();
+        assert(capData().ips.length === 4 && $('[data-cap-dom="visualstudio.com"]').closest('label').textContent.includes('VS Code')
+               && $('[data-cap-dom="discord.com"]').closest('label').textContent.includes('Discord'),
+               'Режим «Все программы» показывает результаты всех программ с их названиями');
+        $('[data-action="cap-program"][data-name="Discord"]').click();
+        assert(!!$('[data-action="cap-auto"]') && !cap.autoAdd, 'Во время анализа есть выключенный переключатель автодобавления');
+        const autoRequests = () => window.testRequests.filter((r) => r.payload && (r.url === '/api/router/groups' || (r.url === '/api/router/ip-routes' && r.payload.destinations)));
+        Object.assign(cap, {autoAdd: true, autoIface: 'Wireguard0'});
+        cap.autoDone.clear();
+        state.groups = [];
+        const realOverview = loadOverview;
+        loadOverview = async () => {};
+        await capAutoAdd();
+        const sent = autoRequests().map((r) => r.payload);
+        const lists = Object.fromEntries(sent.filter((p) => p.title).map((p) => [p.title, p.entries.split('\n').sort()]));
+        const routes = Object.fromEntries(sent.filter((p) => p.destinations).map((p) => [p.comment, p.destinations]));
+        assert(JSON.stringify(lists) === JSON.stringify({'Discord': ['discord.com', 'example.com', 'example.net'], 'VS Code': ['visualstudio.com']})
+               && JSON.stringify(routes) === JSON.stringify({'Discord': ['1.1.1.0/24'], 'VS Code': ['9.9.9.0/24']}),
+               'Автодобавление отправляет новые домены и IP каждой программы, уже добавленный IP пропускается');
+        const sentBefore = autoRequests().length;
+        await capAutoAdd();
+        assert(autoRequests().length === sentBefore, 'Повторное автодобавление не отправляет те же адреса');
+        loadOverview = realOverview;
+        cap.autoAdd = false;
+        cap.selDomains = keptSelection;
+        renderCapResults();
+
         const details = $('.cap-details');
         details.open = true;
         renderCapLive();
@@ -160,6 +189,8 @@ window.addEventListener('load', async () => {
         clearTimeout(cap.timer);
         assert($('#cap-dom-list').textContent.includes('example.org') && cap.archive.query === 'archive.example.net' && cap.selDomains.size === 3,
                'Текущий анализ обновляется при раскрытой истории и сохраняет оба выбора');
+        assert($$('[data-action="cap-hist-close"]').length === 0 && $$('[data-action="cap-hist-open"][aria-expanded="true"]').length === 1
+               && $$('[data-action="cap-hist-delete-all"]').length === 1, 'История сворачивается одной кнопкой, есть удаление всей истории');
         closeCapHistory();
         assert(!$('#cap-history-detail') && cap.selDomains.size === 3 && cap.program === 'Discord', 'Закрытие истории не сбрасывает текущий анализ');
 
@@ -230,6 +261,13 @@ window.addEventListener('load', async () => {
         const resultOptions = $('#cap-results [data-cap-key="ip-options"]');
         renderCapResults();
         assert(resultOptions === $('#cap-results [data-cap-key="ip-options"]') && !!$('#cap-agg', resultOptions), 'Параметры добавления остаются на месте при обновлении');
+        const savedHistory = testHistory.slice();
+        confirmDialog = async () => true;
+        await actions['cap-hist-delete-all']();
+        assert(!cap.history.length && !$('#cap-history').children.length && !!cap.session, 'Удаление всей истории очищает её и не трогает последний анализ');
+        testHistory.push(...savedHistory);
+        cap.history = savedHistory;
+        renderCapHistory();
         document.body.dataset.testStatus = 'passed';
         document.body.dataset.testCount = report.length;
     } catch (error) {

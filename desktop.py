@@ -217,12 +217,36 @@ def run_browser_fallback(url: str, profile_dir: str):
             time.sleep(1.5)
 
 
+def remove_update_leftovers(exe: str) -> int:
+    """
+    Удаляет старые копии EXE рядом с программой: до 2.4.14 обновление переименовывало
+    прежний файл в RouteDeck.exe.backup-..., и закреплённый значок уходил вместе с ним.
+    """
+    folder, name = os.path.split(exe)
+    removed = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    for other in names:
+        lower, base = other.lower(), name.lower()
+        if lower.startswith(base + '.backup-') or (lower.startswith(base + '.update-') and lower.endswith('.tmp')):
+            try:
+                os.remove(os.path.join(folder, other))
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def main():
     try:
         # Свой AppUserModelID - Windows группирует и закрепляет окно как RouteDeck.
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     except Exception:
         pass
+    if getattr(sys, 'frozen', False):
+        remove_update_leftovers(sys.executable)
 
     from app import app, DATA_DIR, logger, capture
     from werkzeug.serving import make_server

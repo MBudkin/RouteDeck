@@ -196,17 +196,31 @@ class InstallerTests(unittest.TestCase):
                 release_lock.set(); thread.join(3)
     def test_replace_waits_for_old_process_and_keeps_backup(self):
         with tempfile.TemporaryDirectory(prefix='install-test-') as directory:
-            root=Path(directory); old=root/'RouteDeck.exe'; old.write_bytes(b'MZold version')
+            root=Path(directory); app_dir=root/'app'; data_dir=root/'data'; app_dir.mkdir()
+            old=app_dir/'RouteDeck.exe'; old.write_bytes(b'MZold version')
+            leftover=app_dir/'RouteDeck.exe.backup-20261001-120000-abcdef12'; leftover.write_bytes(b'MZolder version')
+            unrelated=app_dir/'notes.txt'; unrelated.write_text('keep')
+            identity=os.stat(old).st_ino
             staged=root/'new.exe'; staged.write_bytes(DATA)
             child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(0.2)'])
-            cmd=helper_command(root,staged,old,hashlib.sha256(DATA).hexdigest(),'2.4.6',child.pid,start=False,notify=False)
+            cmd=helper_command(data_dir,staged,old,hashlib.sha256(DATA).hexdigest(),'2.4.6',child.pid,start=False,notify=False)
             result=subprocess.run(cmd,capture_output=True,timeout=30)
             child.wait()
-            detail=(root/'install-result.json').read_text('utf-8-sig') if (root/'install-result.json').exists() else result.stderr
+            detail=(data_dir/'install-result.json').read_text('utf-8-sig') if (data_dir/'install-result.json').exists() else result.stderr
             self.assertEqual(result.returncode,0,detail)
             self.assertEqual(old.read_bytes(),DATA)
-            backups=list(root.glob('RouteDeck.exe.backup-*'))
-            self.assertEqual(len(backups),1); self.assertEqual(backups[0].read_bytes(),b'MZold version')
+            # The same file is rewritten: taskbar pins and shortcuts keep pointing at it.
+            self.assertEqual(os.stat(old).st_ino,identity)
+            self.assertEqual(sorted(p.name for p in app_dir.iterdir()),['RouteDeck.exe','notes.txt'])
+            self.assertEqual((data_dir/'RouteDeck-previous.exe').read_bytes(),b'MZold version')
+    def test_startup_removes_old_installer_leftovers(self):
+        from desktop import remove_update_leftovers
+        with tempfile.TemporaryDirectory(prefix='leftovers-') as directory:
+            root=Path(directory)
+            for name in ['RouteDeck.exe','RouteDeck.exe.backup-20261001-1','RouteDeck.exe.update-abc.tmp','RouteDeck.exe.update-abc.log','Other.exe.backup-1']:
+                (root/name).write_bytes(b'x')
+            self.assertEqual(remove_update_leftovers(str(root/'RouteDeck.exe')),2)
+            self.assertEqual(sorted(p.name for p in root.iterdir()),['Other.exe.backup-1','RouteDeck.exe','RouteDeck.exe.update-abc.log'])
     def test_bad_checksum_never_replaces_original(self):
         with tempfile.TemporaryDirectory(prefix='install-test-') as directory:
             root=Path(directory); old=root/'RouteDeck.exe'; old.write_bytes(b'MZold version')

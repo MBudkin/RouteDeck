@@ -29,6 +29,9 @@ window.fetch = async (url, options = {}) => {
         const ids = payload.indices || [payload.index];
         ipFixture.routes.forEach((r) => { if (ids.includes(r.index)) r.enabled = payload.enabled; });
         body.message = 'Готово';
+    } else if (url === '/api/router/ip-routes/comment') {
+        ipFixture.routes.forEach((r) => { if (payload.indices.includes(r.index)) r.comment = payload.comment; });
+        body.message = `Описание обновлено у ${payload.indices.length}`;
     } else if (url === '/api/router/ip-routes/delete') {
         ipFixture.routes = ipFixture.routes.filter((r) => !payload.indices.includes(r.index));
         body.message = 'Удалено';
@@ -192,6 +195,36 @@ window.addEventListener('load', async () => {
         await openMove({groups: ['domain-list1'], from: 'Wireguard0'});
         assert(gets() === cachedGets && !!$('#move-form'), 'С загруженными маршрутами диалог открывается без ожидания запроса');
         closeModal();
+
+        switchTab('ip');
+        await ensureIpRoutes();
+        storage('s4r-ip-collapsed', '[]');
+        renderIpRoutes();
+        const collapseAll = $('#ip-collapse-all');
+        assert(!collapseAll.hidden && collapseAll.textContent.includes('Свернуть все'), 'Есть кнопка «Свернуть все» для IP-групп');
+        collapseAll.click();
+        assert($$('.ipg').every((g) => g.classList.contains('collapsed')) && collapseAll.textContent.includes('Развернуть все'), 'Все IP-группы сворачиваются одной кнопкой');
+        collapseAll.click();
+        assert($$('.ipg').every((g) => !g.classList.contains('collapsed')), 'Все IP-группы разворачиваются одной кнопкой');
+
+        state.ipSelected = new Set(['1']);
+        renderIpRoutes();
+        assert($('#ip-merge-btn').hidden, 'Объединение недоступно для маршрутов одной группы');
+        state.ipSelected = new Set(['2', '4']);
+        renderIpRoutes();
+        assert(!$('#ip-merge-btn').hidden, 'Объединение доступно для маршрутов из разных групп');
+        $('#ip-merge-btn').click();
+        const mergeForm = $('#ip-merge-form');
+        assert(mergeForm && $$('input[name=pick]', mergeForm).length === 3, 'Окно объединения предлагает названия выбранных групп и своё');
+        mergeForm.querySelector('input[value="new"]').checked = true;
+        mergeForm.dispatchEvent(new Event('change', {bubbles: true}));
+        mergeForm.comment.value = 'Общая группа';
+        mergeForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#ip-merge-form'); n++) await tick();
+        await tick();
+        const merged = ipFixture.requests.filter((r) => r.url === '/api/router/ip-routes/comment').pop().payload;
+        assert(JSON.stringify(merged) === JSON.stringify({indices: ['2', '4'], comment: 'Общая группа'}) && !state.ipSelected.size
+               && ipGroupRoutes('Общая группа').length === 2, 'Выбранные маршруты переходят в одну группу');
 
         const preview = new URLSearchParams(location.search);
         if (preview.has('preview')) {

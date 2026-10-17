@@ -550,6 +550,18 @@ def router_group_remove(name: str):
                     'message': f'Удалено: {len(remove)}'})
 
 
+@app.route('/api/router/groups/merge', methods=['POST'])
+@api
+def router_groups_merge():
+    """Объединяет выбранные списки в target, остальные удаляются."""
+    data = body()
+    result = router().merge_groups(str(data.get('target') or ''), [str(n) for n in data.get('sources') or []],
+                                   (data.get('title') or '').strip() or None)
+    return jsonify({'success': True, 'group': result['group'].to_dict(), 'removed': result['removed'],
+                    'rules_moved': result['rules_moved'],
+                    'message': f"Объединено списков: {len(result['removed']) + 1}, записей: {result['entries']}"})
+
+
 @app.route('/api/router/groups/<name>', methods=['DELETE'])
 @api
 def router_group_delete(name: str):
@@ -841,6 +853,15 @@ def capture_program_delete():
         raise ValueError('Сначала остановите анализ этой программы')
     deleted = capture.store.delete_program(name)
     return jsonify({'success': True, 'deleted': deleted, 'message': f'История «{name}» удалена'})
+
+
+@app.route('/api/capture/history/delete', methods=['POST'])
+@api
+def capture_history_delete():
+    """Удаляет всю историю анализа; сеанс, который идёт сейчас, остаётся."""
+    running = capture.session if capture.session and capture.session.running else None
+    deleted = capture.store.delete_all(keep_session=running.session_id if running else None)
+    return jsonify({'success': True, 'deleted': deleted, 'message': f'История удалена: сеансов {deleted}'})
 
 
 # === Ошибки ===

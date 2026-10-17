@@ -479,6 +479,34 @@ class KeeneticClient:
         self.write(commands)
         return DomainGroup(name=name, description=description, entries=entries)
 
+    def merge_groups(self, target: str, sources: Iterable[str], title: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Объединяет списки: записи sources переходят в target, sources удаляются.
+        Правила sources на интерфейсы, которых у target нет, переносятся в target.
+        """
+        sources = [s for s in dict.fromkeys(sources) if s != target]
+        if not target or not sources:
+            raise ValueError('Выберите хотя бы два списка')
+        groups = {g.name: g for g in self.groups()}
+        if target not in groups or any(n not in groups for n in sources):
+            raise ValueError('Список не найден на роутере - обновите страницу')
+        entries = list(dict.fromkeys(groups[target].entries + [e for n in sources for e in groups[n].entries]))
+        if len(entries) > MAX_GROUP_ENTRIES:
+            raise ValueError(f'В объединённом списке будет {len(entries)} записей, а Keenetic принимает '
+                             f'не больше {MAX_GROUP_ENTRIES}. Выберите меньше списков.')
+        group = self.set_group_entries(target, entries, title or None)
+        routes = self.dns_routes()
+        used = {r.interface for r in routes if r.group == target}
+        moved = 0
+        for r in routes:
+            if r.group in sources and r.interface not in used:
+                self.add_dns_route(target, r.interface, auto=r.auto, reject=r.reject)
+                used.add(r.interface)
+                moved += 1
+        for name in sources:
+            self.delete_group(name)
+        return {'group': group, 'removed': sources, 'rules_moved': moved, 'entries': len(entries)}
+
     def delete_group(self, name: str) -> None:
         commands = [{'dns-proxy': {'route': {'index': r.index, 'no': True}}}
                     for r in self.dns_routes() if r.group == name and r.index]

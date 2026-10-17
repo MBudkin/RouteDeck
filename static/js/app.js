@@ -1103,18 +1103,42 @@ function slug(s) {
  * Скачивает файл экспорта. Отбор делается на клиенте:
  * groups — названия DNS-списков (null = все), ip — фильтр IP-маршрутов (null = все).
  */
-async function exportFile({ groups = null, ip = null, name = '' } = {}) {
-    const res = await api('/api/router/export');
-    const d = res.data;
+async function exportData(groups, ip) {
+    const d = (await api('/api/router/export')).data;
     d.groups = groups === null ? d.groups : d.groups.filter((g) => groups.includes(g.title));
     d.ip_routes = ip === null ? d.ip_routes : d.ip_routes.filter(ip);
     const used = new Set([...d.groups.flatMap((g) => g.routes.map((r) => r.interface)), ...d.ip_routes.map((r) => r.interface)]);
     d.interfaces = d.interfaces.filter((i) => used.has(i.id));
     if (!d.groups.length && !d.ip_routes.length) throw new Error('Нечего экспортировать');
+    return d;
+}
+
+async function exportFile({ groups = null, ip = null, name = '' } = {}) {
+    const d = await exportData(groups, ip);
     const date = new Date().toISOString().slice(0, 10);
     downloadText(`routedeck-${slug(name || d.source.model || 'keenetic').toLowerCase()}-${date}.json`, JSON.stringify(d, null, 2));
     const n = d.groups.length, m = d.ip_routes.length;
     toast(`Экспортировано: ${n} ${plural(n, 'список', 'списка', 'списков')}, ${m} IP-${plural(m, 'маршрут', 'маршрута', 'маршрутов')}`, 'success');
+}
+
+/**
+ * Список сайтов для раздельного туннелирования AmneziaVPN: записи DNS-списков
+ * и адреса IP-маршрутов. resolve — найти IP доменов (Amnezia при импорте их не ищет).
+ */
+async function exportAmnezia({ groups = null, ip = null, resolve = true } = {}) {
+    const d = await exportData(groups, ip);
+    const entries = [...d.groups.flatMap((g) => g.entries || []), ...d.ip_routes.map((r) => r.destination)];
+    if (!entries.length) throw new Error('Нечего экспортировать: в выбранных списках нет записей');
+    const res = await api('/api/amnezia/export', 'POST', { entries, resolve });
+    const date = new Date().toISOString().slice(0, 10);
+    downloadText(`amnezia_sites-${date}.json`, JSON.stringify(res.sites, null, 4) + '\n');
+    const s = res.summary;
+    const skipped = s.skipped_ipv6 + s.skipped_local + s.skipped_invalid;
+    const parts = [`${s.networks} ${plural(s.networks, 'подсеть', 'подсети', 'подсетей')}`,
+        `${s.domains} ${plural(s.domains, 'домен', 'домена', 'доменов')}`];
+    if (s.unresolved) parts.push(`без IP: ${s.unresolved}`);
+    if (skipped) parts.push(`пропущено: ${skipped} (IPv6, домашняя сеть, нераспознанные)`);
+    toast(`Файл для AmneziaVPN: ${parts.join(', ')}`, s.unresolved ? 'info' : 'success');
 }
 
 async function openTransfer(tab = 'export') {
@@ -1131,7 +1155,15 @@ async function openTransfer(tab = 'export') {
             </div>
 
             <div data-pane="export">
-                <p>Отметьте, что сохранить в файл. Файл можно открыть в RouteDeck на другом компьютере и загрузить на другой Keenetic. Пароль роутера в файл не попадает.</p>
+                <div class="modes ex-format">
+                    <label><input type="radio" name="ex-format" value="routedeck"><div><b>RouteDeck</b>
+                        <small>Файл можно открыть в RouteDeck на другом компьютере и загрузить на другой Keenetic. Пароль роутера в файл не попадает.</small></div></label>
+                    <label><input type="radio" name="ex-format" value="amnezia"><div><b>AmneziaVPN</b>
+                        <small>Список сайтов для раздельного туннелирования: «Раздельное туннелирование» → «Сайты» → «Импорт». Домены и IPv4-подсети; IPv6 и адреса домашней сети не попадают. Импортируйте при отключённом VPN.</small></div></label>
+                </div>
+                <label class="ex-resolve" data-amnezia-only><input type="checkbox" name="ex-resolve" checked> Добавить IP-адреса доменов
+                    <small class="muted">AmneziaVPN не ищет IP при импорте, а с AmneziaWG/WireGuard и на телефонах домен без IP не работает. Домен в Amnezia не включает поддомены, поэтому добавляются и IP www.</small></label>
+                <p>Отметьте, что сохранить в файл.</p>
                 <div class="move-cols">
                     <div>
                         <h3><label><input type="checkbox" data-all="ex-g" checked> DNS-списки</label></h3>
@@ -1170,12 +1202,24 @@ async function openTransfer(tab = 'export') {
             });
             bindCheckAll(el);
 
+            const format = () => $('input[name=ex-format]:checked', el)?.value || 'routedeck';
+            const syncFormat = () => {
+                $$('[data-amnezia-only]', el).forEach((n) => { n.hidden = format() !== 'amnezia'; });
+                storage('s4r-export-format', format());
+            };
+            const saved = storage('s4r-export-format') === 'amnezia' ? 'amnezia' : 'routedeck';
+            $(`input[name=ex-format][value=${saved}]`, el).checked = true;
+            syncFormat();
+            $$('input[name=ex-format]', el).forEach((r) => { r.onchange = syncFormat; });
+
             $('[data-export]', el).onclick = async (e) => {
                 const groups = $$('input[name=ex-g]:checked', el).map((c) => c.value);
                 const comments = new Set($$('input[name=ex-ip]:checked', el).map((c) => ckey(ipg[+c.value].comment)));
+                const ip = (r) => comments.has(ckey(r.comment));
                 await withButton(e.currentTarget, async () => {
                     try {
-                        await exportFile({ groups, ip: (r) => comments.has(ckey(r.comment)) });
+                        if (format() === 'amnezia') await exportAmnezia({ groups, ip, resolve: $('input[name=ex-resolve]', el).checked });
+                        else await exportFile({ groups, ip });
                         close();
                     } catch (err) { toast(err.message, 'error'); }
                 });

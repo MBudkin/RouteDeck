@@ -29,7 +29,7 @@ from services.bat_generator import BatGenerator
 from services.dns_resolver import DNSResolver
 from services.subnet_generator import generate_subnets
 from services.settings import Settings
-from services import transfer
+from services import amnezia, transfer
 from services.updates import UpdateManager, UpdateError
 from services.capture.session import CaptureManager, agent_command_factory, list_apps
 from services.capture.store import CaptureStore
@@ -626,6 +626,21 @@ def router_export():
                                   include_ip=request.args.get('ip', '1') != '0',
                                   app_name=APP_NAME)
     return jsonify({'success': True, 'data': data})
+
+
+@app.route('/api/amnezia/export', methods=['POST'])
+@api
+def amnezia_export():
+    """Список раздельного туннелирования AmneziaVPN из записей DNS-списков и IP-маршрутов."""
+    data = body()
+    entries = [str(e) for e in data.get('entries') or []]
+    if not entries:
+        raise ValueError('Нечего экспортировать')
+    resolve = dns_resolver.resolve_domain if data.get('resolve', True) else None
+    result = amnezia.build_sites(entries, resolve)
+    if not result['sites']:
+        raise ValueError('Нет адресов, которые понимает AmneziaVPN: только домены и IPv4')
+    return jsonify({'success': True, **result})
 
 
 def _import_args():

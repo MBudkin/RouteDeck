@@ -1159,10 +1159,10 @@ async function openTransfer(tab = 'export') {
                     <label><input type="radio" name="ex-format" value="routedeck"><div><b>RouteDeck</b>
                         <small>Файл можно открыть в RouteDeck на другом компьютере и загрузить на другой Keenetic. Пароль роутера в файл не попадает.</small></div></label>
                     <label><input type="radio" name="ex-format" value="amnezia"><div><b>AmneziaVPN</b>
-                        <small>Список сайтов для раздельного туннелирования: «Раздельное туннелирование» → «Сайты» → «Импорт». Домены и IPv4-подсети; IPv6 и адреса домашней сети не попадают. Импортируйте при отключённом VPN.</small></div></label>
+                        <small>Список сайтов для раздельного туннелирования: «Раздельное туннелирование» → «Сайты» → «Импорт». Домены и IPv4-подсети; IPv6 и адреса домашней сети не попадают. Импортируйте при отключённом VPN. Нужна AmneziaVPN 5.0.1 или новее: в 5.0.0 подсети при импорте сокращаются до одного адреса.</small></div></label>
                 </div>
                 <label class="ex-resolve" data-amnezia-only><input type="checkbox" name="ex-resolve" checked> Добавить IP-адреса доменов
-                    <small class="muted">AmneziaVPN не ищет IP при импорте, а с AmneziaWG/WireGuard и на телефонах домен без IP не работает. Домен в Amnezia не включает поддомены, поэтому добавляются и IP www.</small></label>
+                    <small class="muted">При добавлении через «+» AmneziaVPN сама находит IP домена, а домены из файла приходят без IP. На компьютере с OpenVPN, Cloak, Shadowsocks или XRay она найдёт их при подключении, но с AmneziaWG/WireGuard и на телефонах домен без IP не работает. Поддомены Amnezia не охватывает, поэтому добавляются и IP www. IP сайтов со временем меняются — повторяйте экспорт.</small></label>
                 <p>Отметьте, что сохранить в файл.</p>
                 <div class="move-cols">
                     <div>

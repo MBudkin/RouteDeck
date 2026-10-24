@@ -2039,13 +2039,52 @@ async function setIpComment(indices, current = '') {
     await loadIpRoutes();
 }
 
-function openIpGroupCreate(comment) {
+function openIpGroupCreate(comment, siteIds = null) {
     const routes = ipGroupRoutes(comment);
     const interfaces = [...new Set(routes.map((r) => r.interface).filter(Boolean))];
     const single = interfaces.length === 1 ? interfaces[0] : '';
-    openIpCreate('', null, comment, {group: true, interface: single,
+    openIpCreate('', siteIds, comment, {group: true, interface: single,
         interfaceTitle: routes.find((r) => r.interface === single)?.interface_title,
         chooseInterface: interfaces.length !== 1});
+}
+
+/** IP сайтов → выбор IP-группы (по описанию маршрутов) или новая группа. */
+async function openPickIpGroup(siteIds) {
+    if (!state.connected) return openSettings();
+    const sites = state.sites.filter((s) => siteIds.includes(s.id));
+    const total = sites.reduce((n, s) => n + (s.ip_count || 0), 0);
+    if (!total) return toast('У выбранных сайтов нет IP — сначала обновите IP', 'error');
+    await ensureIpRoutes();
+    if (state.ipError) return toast(`Не удалось загрузить IP-маршруты: ${state.ipError}`, 'error');
+    const groups = ipGroups().filter((g) => g.comment);
+    const fallback = sites.length === 1 ? sites[0].domain : '';
+    openModal({
+        title: 'IP-адреса → IP-группа',
+        body: `
+            <p>${sites.length === 1 ? `Сайт <b>${esc(sites[0].domain)}</b>` : `Сайтов: ${sites.length}`} · IP: ${total}</p>
+            ${groups.length ? `<div class="pick-list">
+                ${groups.map((g, i) => `
+                    <button class="pick" data-pick="${i}">
+                        ${groupIcon(g.title)}
+                        <div><b>${esc(g.title)}</b><small>${g.routes.length} ${plural(g.routes.length, 'маршрут', 'маршрута', 'маршрутов')} · ${[...new Set(g.routes.map((r) => r.interface_title || r.interface))].map(esc).join(', ')}</small></div>
+                    </button>`).join('')}
+            </div>` : '<p class="muted">IP-групп на роутере пока нет.</p>'}
+            <button class="btn ghost" data-new>${ICONS.plus} Новая группа</button>`,
+        onMount: ({ el, close }) => {
+            el.addEventListener('click', (e) => {
+                const pick = e.target.closest('[data-pick]');
+                if (pick) {
+                    close();
+                    openIpGroupCreate(groups[+pick.dataset.pick].comment, siteIds);
+                    return;
+                }
+                if (e.target.closest('[data-new]')) {
+                    close();
+                    openIpCreate('', siteIds, fallback);
+                }
+            });
+        },
+    });
 }
 
 function openIpCreate(prefill = '', siteIds = null, comment = '', preset = {}) {
@@ -2055,7 +2094,7 @@ function openIpCreate(prefill = '', siteIds = null, comment = '', preset = {}) {
         title: preset.group ? `Добавить IP в «${comment || 'Без описания'}»` : siteIds ? 'IP-адреса сайтов → роутер' : 'Добавить статические маршруты',
         body: `
             <form id="ip-form">
-                ${siteIds ? `<div class="notice">${ICONS.info}<div>IP-адреса выбранных сайтов (${siteIds.length}) будут добавлены как маршруты /32, описанием станет домен сайта. Учтите: IP у крупных сайтов меняются — для них надёжнее DNS-списки.</div></div>`
+                ${siteIds ? `<div class="notice">${ICONS.info}<div>IP-адреса выбранных сайтов (${siteIds.length}) будут добавлены как маршруты /32${preset.group ? ' в эту группу' : ', без описания им станет домен сайта'}. Адреса, которые уже есть на роутере в другой группе, там и останутся. Учтите: IP у крупных сайтов меняются — для них надёжнее DNS-списки.</div></div>`
                     : `<label class="field"><span>Адреса и подсети</span>
                         <textarea name="dest" placeholder="91.108.56.0/22&#10;149.154.160.0/20&#10;95.161.64.0/20" spellcheck="false" autofocus>${esc(prefill)}</textarea>
                         <small>Понимает CIDR, одиночные IP и строки bat-файлов: route add 1.2.3.0 mask 255.255.255.0 0.0.0.0</small></label>
@@ -2143,6 +2182,7 @@ function renderSites() {
             <td class="hide-sm muted">${relTime(s.last_ip_update || s.updated_at)}</td>
             <td class="col-actions"><div class="actions">
                 <button class="icon-btn sm plain" data-action="site-to-list" data-id="${s.id}" title="Добавить домен в DNS-список роутера">${ICONS.list}</button>
+                <button class="icon-btn sm plain" data-action="site-to-routes" data-id="${s.id}" title="Добавить IP-адреса в IP-группу роутера" ${s.ip_count ? '' : 'disabled'}>${ICONS.router}</button>
                 <button class="icon-btn sm plain" data-action="site-refresh" data-id="${s.id}" title="Обновить IP">${ICONS.refresh}</button>
                 <button class="icon-btn sm plain" data-action="site-refresh-html" data-id="${s.id}" title="Обновить IP вместе с доменами со страницы">${ICONS.globe}</button>
                 <button class="icon-btn sm plain" data-action="site-bat" data-id="${s.id}" title="Скачать bat-файл" ${s.ip_count ? '' : 'disabled'}>${ICONS.download}</button>
@@ -3345,7 +3385,8 @@ const actions = {
     'sites-select-all'() { state.sitesSelected = new Set(state.sites.map((s) => s.id)); renderSites(); },
     'sites-clear-selection'() { state.sitesSelected.clear(); renderSites(); },
     'sites-to-list': () => openPickGroup([...new Set(state.sites.filter((s) => state.sitesSelected.has(s.id)).map((s) => s.domain))], 'Домены → DNS-список'),
-    'sites-to-routes': () => openIpCreate('', [...state.sitesSelected]),
+    'sites-to-routes': () => openPickIpGroup([...state.sitesSelected]),
+    'site-to-routes': (el) => openPickIpGroup([+el.dataset.id]),
     'bat-download': () => downloadBats().catch(() => {}),
 
     'cap-source'(el) {

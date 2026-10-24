@@ -201,9 +201,10 @@ window.addEventListener('load', async () => {
         storage('s4r-ip-collapsed', '[]');
         renderIpRoutes();
         const collapseAll = $('#ip-collapse-all');
-        assert(!collapseAll.hidden && collapseAll.textContent.includes('Свернуть все'), 'Есть кнопка «Свернуть все» для IP-групп');
+        const tip = (el) => el.title || el.dataset.tip;
+        assert(!collapseAll.hidden && tip(collapseAll) === 'Свернуть все', 'Есть кнопка «Свернуть все» для IP-групп');
         collapseAll.click();
-        assert($$('.ipg').every((g) => g.classList.contains('collapsed')) && collapseAll.textContent.includes('Развернуть все'), 'Все IP-группы сворачиваются одной кнопкой');
+        assert($$('.ipg').every((g) => g.classList.contains('collapsed')) && tip(collapseAll) === 'Развернуть все', 'Все IP-группы сворачиваются одной кнопкой');
         collapseAll.click();
         assert($$('.ipg').every((g) => !g.classList.contains('collapsed')), 'Все IP-группы разворачиваются одной кнопкой');
 
@@ -225,6 +226,23 @@ window.addEventListener('load', async () => {
         const merged = ipFixture.requests.filter((r) => r.url === '/api/router/ip-routes/comment').pop().payload;
         assert(JSON.stringify(merged) === JSON.stringify({indices: ['2', '4'], comment: 'Общая группа'}) && !state.ipSelected.size
                && ipGroupRoutes('Общая группа').length === 2, 'Выбранные маршруты переходят в одну группу');
+
+        state.ipSelected.clear();
+        $('#ip-search').value = 'discord';
+        renderIpRoutes();
+        const ipMaster = $('#ip-check-all');
+        assert(!ipMaster.closest('.select-all').hidden && !ipMaster.checked, 'В IP-маршрутах есть флажок «Выбрать все»');
+        ipMaster.click();
+        assert(state.ipSelected.size === ipGroupRoutes('Discord').length && [...state.ipSelected].every((i) => ipGroupRoutes('Discord').some((r) => r.index === i)),
+               'Флажок выбирает только маршруты, подходящие под фильтр');
+        $('#ip-search').value = '';
+        renderIpRoutes();
+        assert(ipMaster.indeterminate && !$('#ip-select-all-link').hidden, 'Без фильтра выбор частичный, предложено выбрать все');
+        $('#ip-select-all-link').click();
+        assert(state.ipSelected.size === state.ipRoutes.length && ipMaster.checked && $('#ip-select-all-link').hidden, 'Ссылка выбирает все маршруты');
+        assert($('[data-action="ip-enable-selected"]').disabled && !$('[data-action="ip-disable-selected"]').disabled, 'Включить недоступно, когда все выбранные маршруты включены');
+        ipMaster.click();
+        assert(!state.ipSelected.size && $('#ip-bulk').hidden, 'Снятие флажка снимает выбор');
 
         const preview = new URLSearchParams(location.search);
         if (preview.has('preview')) {

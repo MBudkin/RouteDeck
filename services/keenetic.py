@@ -539,6 +539,14 @@ class KeeneticClient:
     def set_dns_route_enabled(self, index: str, enabled: bool) -> None:
         self.write([{'dns-proxy': {'route': {'disable': {'index': index, 'no': enabled}}}}])
 
+    def set_dns_routes_enabled(self, indices: Iterable[str], enabled: bool) -> int:
+        """Включает или выключает правила DNS-маршрутизации одним пакетом."""
+        commands = [{'dns-proxy': {'route': {'disable': {'index': i, 'no': enabled}}}}
+                    for i in dict.fromkeys(indices) if i]
+        if commands:
+            self.write(commands)
+        return len(commands)
+
     def delete_dns_route(self, index: str) -> None:
         self.write([{'dns-proxy': {'route': {'index': index, 'no': True}}}])
 

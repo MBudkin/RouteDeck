@@ -24,7 +24,37 @@ const ICONS = {
     link: '<svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
     bolt: '<svg viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>',
     swap: '<svg viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></svg>',
+    collapseAll: '<svg viewBox="0 0 24 24"><path d="m7 20 5-5 5 5M7 4l5 5 5-5"/></svg>',
+    expandAll: '<svg viewBox="0 0 24 24"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>',
+    gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
 };
+
+/** Флажок «выбрать все»: отмечен, если выбрано всё, и «наполовину», если выбрана часть. */
+function setMaster(box, selected, total) {
+    if (!box) return;
+    box.disabled = !total;
+    box.checked = total > 0 && selected >= total;
+    box.indeterminate = selected > 0 && !box.checked;
+}
+
+/** Состояние «наполовину» нельзя задать атрибутом — переносим его из data-partial после отрисовки. */
+function syncPartial(root = document) {
+    $$('input.tri[data-partial], input.tri:indeterminate', root).forEach((c) => { c.indeterminate = c.hasAttribute('data-partial'); });
+}
+
+/** Разметка флажка «выбрать все» (для списков, которые отрисовываются строкой HTML). */
+function masterBox(action, selected, total, title, attrs = '') {
+    const all = total > 0 && selected >= total;
+    return `<label class="select-all sm" title="${esc(title)}"><input type="checkbox" class="tri" data-action="${action}" ${attrs} aria-label="${esc(title)}"${all ? ' checked' : ''}${selected && !all ? ' data-partial="1"' : ''}${total ? '' : ' disabled'}></label>`;
+}
+
+/** Текст панели выбора и ссылка «Выбрать все», пока выбрано не всё. */
+function renderBulkCount(prefix, selected, total, noun) {
+    $(`#${prefix}-bulk-count`).innerHTML = `Выбрано: ${selected}${total > selected ? ` <small>из ${total}</small>` : ''}`;
+    const link = $(`#${prefix}-select-all-link`);
+    link.hidden = selected >= total;
+    link.textContent = `Выбрать все ${noun} (${total})`;
+}
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const plural = (n, one, few, many) => {
@@ -92,6 +122,8 @@ function storage(key, value) {
 
 async function api(url, method = 'GET', body) {
     const opts = { method, headers: {} };
+    // Запрос адресован роутеру, открытому на странице: сервер не перепутает его с другим.
+    if (state.settings?.active_router) opts.headers['X-Router'] = state.settings.active_router;
     if (body !== undefined) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
@@ -172,14 +204,14 @@ async function task(text, fn, successText) {
         return result;
     } catch (e) {
         t.update(e.message, 'error');
-        if (e.code === 'auth') setConn('err', 'Нет доступа');
+        if (e.code === 'auth') setConn('err', 'нет доступа');
         throw e;
     }
 }
 
 // ============================================================ модальные окна
 
-function openModal({ title, body, foot = '', size = '', onMount }) {
+function openModal({ title, body, foot = '', size = '', onMount, onClose }) {
     const root = $('#modal-root');
     const wrap = document.createElement('div');
     wrap.className = 'backdrop';
@@ -194,9 +226,11 @@ function openModal({ title, body, foot = '', size = '', onMount }) {
 
     const prevFocus = document.activeElement;
     const close = () => {
+        if (!wrap.isConnected) return;
         wrap.remove();
         document.removeEventListener('keydown', onKey, true);
         prevFocus?.focus?.();
+        onClose?.();
     };
     const onKey = (e) => {
         if (e.key === 'Escape' && root.lastElementChild === wrap) {
@@ -286,10 +320,25 @@ const state = {
     sitesSelected: new Set(),
 };
 
-function setConn(kind, text) {
+/** Активный роутер из настроек: {id, name, router_host, ...} или null. */
+function activeRouter() {
+    const s = state.settings;
+    return s?.routers?.find((r) => r.id === s.active_router) || null;
+}
+
+function routerName(r = activeRouter()) {
+    return r ? (r.name || r.router_host) : '';
+}
+
+/** Кнопка роутера: название активного роутера и состояние подключения. */
+function setConn(kind, status = '') {
     const el = $('#conn');
+    const r = activeRouter();
     el.className = `conn ${kind}`;
-    $('.conn-text', el).textContent = text;
+    $('.conn-text', el).textContent = r ? [routerName(r), status].filter(Boolean).join(' · ') : 'Не подключено';
+    const many = (state.settings?.routers?.length || 0) > 1;
+    el.title = r ? `${routerName(r)} — ${r.router_host}${state.system ? ` · ${state.system.model}` : ''}\nНажмите, чтобы ${many ? 'переключить роутер или ' : ''}изменить подключение`
+        : 'Подключить роутер';
 }
 
 function ifaceTitle(id) {
@@ -331,21 +380,25 @@ async function loadSettings() {
     return data.settings;
 }
 
+let routerEpoch = 0;          // меняется при переключении роутера: поздние ответы прежнего не применяются
+
 async function loadOverview({ quiet = false } = {}) {
     if (!state.settings?.has_password) {
         state.connected = false;
-        setConn('', 'Не подключено');
+        setConn('', activeRouter() ? 'нет пароля' : '');
         renderGroups();
         if ($('#view-ip').classList.contains('active')) renderIpRoutes();
         return;
     }
+    const epoch = routerEpoch;
     state.loadingGroups = !state.groups.length;
     state.overviewLoading = true;
     if (state.loadingGroups) renderGroups();
-    setConn('busy', 'Подключение…');
+    setConn('busy', 'подключение…');
     if ($('#view-ip').classList.contains('active')) renderIpRoutes();
     try {
         const data = await api('/api/router/overview');
+        if (epoch !== routerEpoch) return;
         Object.assign(state, {
             connected: true,
             overviewLoading: false,
@@ -357,15 +410,16 @@ async function loadOverview({ quiet = false } = {}) {
             defaultInterface: data.default_interface || '',
             loadingGroups: false,
         });
-        setConn('ok', data.system.model);
+        setConn('ok');
         $('#router-caption').textContent = `${data.system.model} · KeeneticOS ${data.system.release}`.trim();
         if (!quiet) toast('Данные роутера обновлены', 'success', { timeout: 1800 });
     } catch (e) {
+        if (epoch !== routerEpoch) return;
         state.connected = false;
         state.overviewLoading = false;
         state.loadingGroups = false;
         state.error = e.message;
-        setConn('err', e.code === 'auth' ? 'Нет доступа' : 'Ошибка');
+        setConn('err', e.code === 'auth' ? 'нет доступа' : 'ошибка');
         toast(e.message, 'error');
     }
     renderGroups();
@@ -376,16 +430,89 @@ async function loadOverview({ quiet = false } = {}) {
     }
 }
 
-function openSettings() {
-    const s = state.settings || {};
+/** Сбрасывает всё, что относится к прежнему роутеру: списки, маршруты, выбор и раскрытые строки. */
+function resetRouterState() {
+    routerEpoch++;
+    Object.assign(state, {
+        connected: false, overviewLoading: false, loadingGroups: false, error: '', system: null,
+        interfaces: [], groups: [], defaultInterface: '',
+        expanded: new Set(), fresh: new Map(), listOpen: new Set(), groupSelected: new Set(), ipSelected: new Set(),
+    });
+    invalidateIpRoutes();
+    if (cap.autoAdd) {
+        cap.autoAdd = false;
+        toast('Автодобавление адресов выключено: выбран другой роутер', 'info');
+    }
+    $('#router-caption').textContent = 'Маршрутизация сайтов через VPN';
+    renderGroups();
+    renderIpRoutes();
+    if (capVisible()) renderCapResults();
+}
+
+async function switchRouter(id) {
+    if (id === state.settings?.active_router) return;
+    try {
+        const res = await api('/api/routers/select', 'POST', { id });
+        state.settings = res.settings;
+        resetRouterState();
+        toast(`Роутер: ${routerName()}`, 'info', { timeout: 1800 });
+        await loadOverview({ quiet: true });
+    } catch (e) {
+        toast(e.message, 'error');
+    }
+}
+
+let routerMenuClosed = 0;
+
+/** Меню кнопки роутера: переключение между роутерами, настройки и добавление нового. */
+function openRouterMenu(btn) {
+    const routers = state.settings?.routers || [];
+    if (!routers.length) return openSettings();
+    if (Date.now() - routerMenuClosed < 400) return;   // повторный клик по кнопке только закрывает меню
+    const active = activeRouter();
+    const rect = btn.getBoundingClientRect();
+    const items = [
+        ...(routers.length > 1 ? [{ title: 'Роутеры' }] : []),
+        ...routers.map((r) => ({
+            label: routerName(r), note: r.router_host + (r.has_password ? '' : ' · нет пароля'), checked: r.id === active?.id,
+            run: () => switchRouter(r.id),
+        })),
+        '-',
+        { label: `Настройки «${routerName(active)}»…`, icon: ICONS.gear, run: () => openSettings(active.id) },
+        { label: 'Добавить роутер…', icon: ICONS.plus, run: () => openSettings(null) },
+    ];
+    btn.setAttribute('aria-expanded', 'true');
+    showMenu(rect.left, rect.bottom + 6, items, (trigger) => {
+        if (trigger && btn.contains(trigger)) routerMenuClosed = Date.now();
+        btn.setAttribute('aria-expanded', 'false');
+    });
+}
+
+/**
+ * Настройки подключения. id - существующий роутер (по умолчанию активный), null - новый роутер.
+ * Новый роутер сохраняется при первой попытке подключения; если окно закрыли, так и не подключившись,
+ * он удаляется и снова выбирается прежний роутер.
+ */
+function openSettings(id = state.settings?.active_router || null) {
+    const routers = state.settings?.routers || [];
+    const previous = state.settings?.active_router || '';
+    const current = routers.find((r) => r.id === id) || null;
+    let created = '', connected = false;
+    const isNew = !current;
+    const adding = isNew && routers.length > 0;
+    const s = current || {};
     openModal({
-        title: 'Подключение к роутеру',
+        title: adding ? 'Новый роутер' : 'Подключение к роутеру',
         body: `
             <div class="notice">${ICONS.info}<div>Программа работает с роутером через тот же API, что и его веб-интерфейс.
-            Пароль хранится локально в <code>settings.json</code>, зашифрованный средствами Windows (DPAPI).</div></div>
+            Пароль хранится локально в <code>settings.json</code>, зашифрованный средствами Windows (DPAPI).${adding || routers.length > 1 ? ' Роутеры переключаются кнопкой в правом верхнем углу.' : ''}</div></div>
             <form id="settings-form" autocomplete="off">
-                <label class="field"><span>Адрес роутера</span>
-                    <input type="text" name="router_host" value="${esc(s.router_host || '192.168.1.1')}" placeholder="192.168.1.1 или my.keenetic.net" required autofocus></label>
+                <div class="row">
+                    <label class="field"><span>Адрес роутера</span>
+                        <input type="text" name="router_host" value="${esc(s.router_host || (adding ? '' : '192.168.1.1'))}" placeholder="192.168.1.1 или my.keenetic.net" required autofocus></label>
+                    <label class="field"><span>Название</span>
+                        <input type="text" name="name" value="${esc(s.name || '')}" placeholder="Дом, дача… или модель" maxlength="60"></label>
+                </div>
                 <div class="row">
                     <label class="field"><span>Логин</span>
                         <input type="text" name="router_login" value="${esc(s.router_login || 'admin')}" required></label>
@@ -395,14 +522,31 @@ function openSettings() {
                 ${s.has_password ? `<div class="forget-password"><button type="button" class="btn ghost" data-forget-password>Забыть пароль</button>
                     <span class="muted">Удалит сохранённый пароль. Введите новый, чтобы подключиться.</span></div>` : ''}
             </form>`,
-        foot: `<button class="btn ghost" data-close>Отмена</button>
-               <button class="btn primary" type="submit" form="settings-form">Подключиться</button>`,
+        foot: `${isNew ? '' : `<button class="btn ghost danger-text foot-left" data-delete-router title="Убрать роутер из программы. На самом роутере ничего не изменится">${ICONS.trash}Удалить роутер</button>`}
+               <button class="btn ghost" data-close>Отмена</button>
+               <button class="btn primary" type="submit" form="settings-form">${adding ? 'Добавить и подключиться' : 'Подключиться'}</button>`,
+        onClose: () => {
+            // Дополнительный роутер, к которому так и не подключились, не остаётся в списке
+            // (первый роутер сохраняется, как и раньше: адрес и пароль не придётся вводить заново).
+            if (!created || connected || !adding) return;
+            (async () => {
+                let res = await api('/api/routers/delete', 'POST', { id: created });
+                if (previous && res.settings.routers.some((r) => r.id === previous) && res.settings.active_router !== previous) {
+                    res = await api('/api/routers/select', 'POST', { id: previous });
+                }
+                state.settings = res.settings;
+                resetRouterState();
+                await loadOverview({ quiet: true });
+            })().catch((e) => toast(e.message, 'error'));
+        },
         onMount: ({ el, close }) => {
             const forget = $('[data-forget-password]', el);
             if (forget) forget.onclick = () => withButton(forget, async () => {
                 try {
-                    const res = await api('/api/router/settings', 'PUT', { forget_password: true });
+                    const res = await api('/api/router/settings', 'PUT', { id: current.id, forget_password: true });
+                    const switched = res.settings.active_router !== state.settings?.active_router;
                     state.settings = res.settings;
+                    if (switched) resetRouterState();
                     const input = $('[name=router_password]', el);
                     input.value = '';
                     input.placeholder = 'Пароль администратора';
@@ -410,26 +554,50 @@ function openSettings() {
                     forget.parentElement.remove();
                     input.focus();
                     state.connected = false;
-                    setConn('err', 'Нет пароля');
+                    setConn('err', 'нет пароля');
                     toast(res.message, 'success');
                 } catch (err) {
                     toast(err.message, 'error');
                 }
             });
+            const remove = $('[data-delete-router]', el);
+            if (remove) remove.onclick = async () => {
+                if (!await confirmDialog(`Убрать роутер <b>«${esc(routerName(current))}»</b> из программы? Сохранённый пароль удалится. Списки и маршруты на самом роутере не изменятся.`, { ok: 'Удалить' })) return;
+                try {
+                    const res = await api('/api/routers/delete', 'POST', { id: current.id });
+                    const switched = res.settings.active_router !== state.settings?.active_router;
+                    state.settings = res.settings;
+                    close();
+                    toast(res.message, 'success');
+                    if (switched) {
+                        resetRouterState();
+                        await loadOverview({ quiet: true });
+                    } else setConn(state.connected ? 'ok' : '');
+                } catch (err) {
+                    toast(err.message, 'error');
+                }
+            };
             $('form', el).onsubmit = async (e) => {
                 e.preventDefault();
                 const f = e.target;
-                const btn = $('.modal-foot .primary', el);
-                await withButton(btn, async () => {
+                await withButton($('.modal-foot .primary', el), async () => {
                     try {
+                        const target = current?.id || created;
                         const saved = await api('/api/router/settings', 'PUT', {
+                            ...(target ? { id: target } : { new: true }),
+                            name: f.name.value.trim(),
                             router_host: f.router_host.value.trim(),
                             router_login: f.router_login.value.trim(),
                             router_password: f.router_password.value,
                         });
+                        if (!target) created = saved.id;
+                        const switched = saved.settings.active_router !== state.settings?.active_router;
                         state.settings = saved.settings;
+                        if (switched) resetRouterState();
                         const res = await api('/api/router/test', 'POST', {});
-                        toast(`Подключено: ${res.system.model} (${res.system.release})`, 'success');
+                        connected = true;
+                        state.settings = res.settings;
+                        toast(`Подключено: ${routerName()} — ${res.system.model} (${res.system.release})`, 'success');
                         close();
                         state.groups = [];
                         invalidateIpRoutes();
@@ -464,12 +632,7 @@ function renderGroups() {
         b.classList.toggle('active', b.dataset.view === state.dnsView);
         b.setAttribute('aria-pressed', String(b.dataset.view === state.dnsView));
     });
-    const alive = new Set(state.groups.map((g) => g.name));
-    state.groupSelected = new Set([...state.groupSelected].filter((n) => alive.has(n)));
-    const nSel = state.groupSelected.size;
-    $('#dns-bulk').hidden = !nSel || !state.connected;
-    $('#dns-bulk-count').textContent = `Выбрано списков: ${nSel}`;
-    $('[data-action="dns-merge"]').disabled = nSel < 2;
+    renderDnsSelection(q);
 
     if (!state.settings?.has_password || (!state.connected && !state.groups.length && !state.loadingGroups)) {
         const needSetup = !state.settings?.has_password;
@@ -508,6 +671,72 @@ function renderGroups() {
     renderSearchHint(q);
 }
 
+/** Списки, подходящие под поиск (без поиска - все): их отмечает «Выбрать все». */
+function dnsShownGroups(q = searchQuery()) {
+    return q ? state.groups.filter((g) => g.title.toLowerCase().includes(q) || g.entries.some((e) => e.includes(q) || covers(e, q))) : state.groups;
+}
+
+function selectedGroups() {
+    return state.groups.filter((g) => state.groupSelected.has(g.name));
+}
+
+/** «Выбрать все», панель действий с выбранными списками и «Свернуть все» для вида списком. */
+function renderDnsSelection(q) {
+    const alive = new Set(state.groups.map((g) => g.name));
+    state.groupSelected = new Set([...state.groupSelected].filter((n) => alive.has(n)));
+    const shown = dnsShownGroups(q);
+    const ready = state.connected && state.groups.length > 0;
+    const nSel = state.groupSelected.size;
+    $('#dns-check-all').closest('.select-all').hidden = !ready;
+    setMaster($('#dns-check-all'), shown.filter((g) => state.groupSelected.has(g.name)).length, shown.length);
+    $('#dns-bulk').hidden = !nSel || !state.connected;
+    renderBulkCount('dns', nSel, state.groups.length, 'списки');
+    const routes = selectedGroups().flatMap((g) => g.routes);
+    const on = routes.filter((r) => r.enabled).length;
+    $('[data-action="dns-merge"]').disabled = nSel < 2;
+    $('[data-action="dns-enable-selected"]').disabled = on === routes.length;
+    $('[data-action="dns-disable-selected"]').disabled = !on;
+    $('[data-action="dns-move-selected"]').disabled = !routes.length;
+
+    const toggle = $('#dns-collapse-all');
+    toggle.hidden = !ready || state.dnsView !== 'list' || state.groups.length < 2 || !!q;
+    const anyOpen = state.groups.some((g) => state.listOpen.has(g.name));
+    toggle.dataset.collapse = anyOpen ? '1' : '0';
+    toggle.title = anyOpen ? 'Свернуть все' : 'Развернуть все';
+    toggle.innerHTML = anyOpen ? ICONS.collapseAll : ICONS.expandAll;
+}
+
+/** Включает или выключает правила выбранных списков одним запросом. */
+async function setGroupsEnabled(enabled) {
+    const routes = selectedGroups().flatMap((g) => g.routes);
+    if (!routes.length) return toast('У выбранных списков нет правил маршрутизации', 'info');
+    const ids = routes.filter((r) => r.enabled !== enabled).map((r) => r.index);
+    if (!ids.length) return toast(enabled ? 'Правила уже включены' : 'Правила уже выключены', 'info', { timeout: 2500 });
+    try {
+        const res = await api('/api/router/dns-routes/toggle', 'POST', { indices: ids, enabled });
+        routes.forEach((r) => { if (ids.includes(r.index)) r.enabled = enabled; });
+        renderGroups();
+        toast(res.message, 'success', { timeout: 2500 });
+    } catch (e) {
+        toast(e.message, 'error');
+        await loadOverview({ quiet: true });
+    }
+}
+
+async function deleteSelectedGroups() {
+    const groups = selectedGroups();
+    if (!groups.length) return;
+    const entries = groups.reduce((n, g) => n + g.count, 0);
+    const what = groups.length === 1 ? `список <b>«${esc(groups[0].title)}»</b>` : `${groups.length} ${plural(groups.length, 'список', 'списка', 'списков')}`;
+    if (!await confirmDialog(`Удалить ${what} (${entries} ${plural(entries, 'запись', 'записи', 'записей')}) вместе с правилами маршрутизации?`)) return;
+    await task('Удаление списков…', async () => {
+        for (const g of groups) await api(`/api/router/groups/${encodeURIComponent(g.name)}`, 'DELETE', {});
+        return { message: `Удалено списков: ${groups.length}` };
+    }).catch(() => {});
+    state.groupSelected.clear();
+    await loadOverview({ quiet: true });
+}
+
 /** Вид «списком»: строка на список, записи и правила раскрываются по клику. */
 function renderGroupList(box, q) {
     const drafts = new Map($$('.glist-row', box).map((row) => [row.dataset.name, $('.group-add input', row)?.value || '']));
@@ -533,7 +762,7 @@ function groupRow(g, q) {
     return `
     <article class="glist-row${open ? ' open' : ''}${dim ? ' dim' : ''}${q && hits.length ? ' match' : ''}${sel ? ' selected' : ''}" data-name="${esc(g.name)}" data-render-key="glist:${esc(g.name)}">
         <div class="glist-head">
-            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать для объединения" aria-label="Выбрать «${esc(g.title)}»">
+            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать" aria-label="Выбрать «${esc(g.title)}»">
             <button class="glist-toggle" data-action="group-row-toggle" data-group="${esc(g.name)}" aria-expanded="${open}" title="${open ? 'Свернуть' : 'Показать записи и правила'}">
                 <svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>${groupIcon(g.title)}
                 <span class="glist-title"><b>${esc(g.title)}</b><small>${g.count} из ${g.limit}${q && hits.length ? ` · найдено: ${hits.length}` : ''}</small></span>
@@ -715,7 +944,7 @@ function groupCard(g, q) {
     return `
     <article class="group card${dim ? ' dim' : ''}${q && hits.length ? ' match' : ''}${expanded ? ' expanded' : ''}${sel ? ' selected' : ''}" data-name="${esc(g.name)}">
         <div class="group-head">
-            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать для объединения" aria-label="Выбрать «${esc(g.title)}»">
+            <input type="checkbox" class="group-check" data-action="group-select" data-group="${esc(g.name)}" ${sel ? 'checked' : ''} title="Выбрать" aria-label="Выбрать «${esc(g.title)}»">
             ${groupIcon(g.title)}
             <div class="group-title">
                 <h2 data-action="group-rename" data-group="${esc(g.name)}" title="${esc(g.title)} — нажмите, чтобы переименовать">${esc(g.title)}</h2>
@@ -1404,7 +1633,7 @@ function openImport(data, fileName) {
     const ipg = ipGroups(data.ip_routes || []);
 
     openModal({
-        title: 'Импорт на этот роутер',
+        title: `Импорт на роутер «${routerName() || 'этот роутер'}»`,
         size: 'lg',
         body: `
             <div class="notice">${ICONS.info}<div><b>${esc(fileName)}</b><br>
@@ -1609,6 +1838,16 @@ function ipCollapsed() {
     try { return new Set(JSON.parse(storage('s4r-ip-collapsed') || '[]')); } catch { return new Set(); }
 }
 
+/** IP-группы с маршрутами, подходящими под фильтр: [{...группа, shown: [маршруты]}]. */
+function ipShownGroups(all = state.ipRoutes || [], q = $('#ip-search').value.trim().toLowerCase()) {
+    return ipGroups(all).map((g) => {
+        const titleHit = q && g.title.toLowerCase().includes(q);
+        const routes = !q || titleHit ? g.routes : g.routes.filter((r) =>
+            [r.destination, r.interface, r.interface_title].some((v) => String(v).toLowerCase().includes(q)));
+        return { ...g, shown: routes };
+    }).filter((g) => g.shown.length);
+}
+
 function renderIpRoutes() {
     const box = $('#ip-groups');
     const empty = $('#ip-empty');
@@ -1618,10 +1857,16 @@ function renderIpRoutes() {
     const all = state.ipRoutes || [];
 
     const n = state.ipSelected.size;
+    const selected = all.filter((r) => state.ipSelected.has(r.index));
     $('#ip-bulk').hidden = !n;
-    $('#ip-bulk-count').textContent = `Выбрано: ${n}`;
-    $('#ip-merge-btn').hidden = ipGroups(all.filter((r) => state.ipSelected.has(r.index))).length < 2;
+    renderBulkCount('ip', n, all.length, 'маршруты');
+    $('#ip-merge-btn').hidden = ipGroups(selected).length < 2;
+    $('[data-action="ip-enable-selected"]').disabled = selected.every((r) => r.enabled);
+    $('[data-action="ip-disable-selected"]').disabled = !selected.some((r) => r.enabled);
     $('#ip-collapse-all').hidden = true;
+    const master = $('#ip-check-all');
+    master.closest('.select-all').hidden = !state.connected || !all.length;
+    setMaster(master, 0, 0);
     box.setAttribute('aria-busy', String(state.ipLoading));
     $('[data-action="ip-reload"]').disabled = state.ipLoading || state.overviewLoading;
 
@@ -1646,12 +1891,7 @@ function renderIpRoutes() {
         return;
     }
 
-    const groups = ipGroups(all).map((g) => {
-        const titleHit = q && g.title.toLowerCase().includes(q);
-        const routes = !q || titleHit ? g.routes : g.routes.filter((r) =>
-            [r.destination, r.interface, r.interface_title].some((v) => String(v).toLowerCase().includes(q)));
-        return { ...g, shown: routes };
-    }).filter((g) => g.shown.length);
+    const groups = ipShownGroups(all, q);
 
     if (!groups.length) {
         box.innerHTML = '';
@@ -1660,13 +1900,14 @@ function renderIpRoutes() {
         return;
     }
     empty.hidden = true;
+    const shown = groups.flatMap((g) => g.shown);
+    setMaster(master, shown.filter((r) => state.ipSelected.has(r.index)).length, shown.length);
     const allCollapsed = groups.every((g) => collapsed.has(ckey(g.comment)));
     const toggleAll = $('#ip-collapse-all');
     toggleAll.hidden = groups.length < 2 || !!q;
     toggleAll.dataset.collapse = allCollapsed ? '0' : '1';
-    toggleAll.innerHTML = allCollapsed
-        ? '<svg viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg>Развернуть все'
-        : '<svg viewBox="0 0 24 24"><path d="m7 15 5-5 5 5"/></svg>Свернуть все';
+    toggleAll.title = allCollapsed ? 'Развернуть все' : 'Свернуть все';
+    toggleAll.innerHTML = allCollapsed ? ICONS.expandAll : ICONS.collapseAll;
 
     renderHtml(box, groups.map((g) => {
         const key = g.comment;
@@ -1677,7 +1918,7 @@ function renderIpRoutes() {
         return `
         <section class="ipg card${isCollapsed ? ' collapsed' : ''}${off === g.routes.length ? ' all-off' : ''}" data-comment="${esc(key)}" data-render-key="ip-group:${esc(ckey(key))}">
             <header class="ipg-head">
-                <input type="checkbox" data-action="ipg-select" data-comment="${esc(key)}" ${sel && sel === g.routes.length ? 'checked' : ''} ${sel && sel < g.routes.length ? 'data-partial="1"' : ''} title="Выбрать всю группу">
+                <input type="checkbox" class="tri" data-action="ipg-select" data-comment="${esc(key)}" ${sel && sel === g.routes.length ? 'checked' : ''} ${sel && sel < g.routes.length ? 'data-partial="1"' : ''} title="Выбрать всю группу">
                 <label class="switch${off && off < g.routes.length ? ' partial' : ''}" title="${off === g.routes.length ? 'Включить всю группу' : 'Выключить всю группу'}${off && off < g.routes.length ? ` (сейчас выключено ${off} из ${g.routes.length})` : ''}">
                     <input type="checkbox" data-action="ipg-enable" data-comment="${esc(key)}" ${off < g.routes.length ? 'checked' : ''}><span></span></label>
                 <button class="ipg-toggle" data-action="ipg-toggle" data-comment="${esc(key)}">
@@ -1707,7 +1948,7 @@ function renderIpRoutes() {
             </div>
         </section>`;
     }).join(''));
-    $$('[data-action="ipg-select"]', box).forEach((c) => { c.indeterminate = c.hasAttribute('data-partial'); });
+    syncPartial(box);
 }
 
 function ipGroupRoutes(comment) {
@@ -1911,11 +2152,9 @@ function renderSites() {
 
     const n = state.sitesSelected.size;
     $('#sites-bulk').hidden = !n;
-    $('#sites-bulk-count').textContent = `Выбрано: ${n}`;
+    renderBulkCount('sites', n, state.sites.length, 'сайты');
     $('#bat-scope').textContent = n ? `(выбрано: ${n})` : '(все сайты)';
-    const all = $('#sites-check-all');
-    all.checked = state.sites.length > 0 && n === state.sites.length;
-    all.indeterminate = n > 0 && n < state.sites.length;
+    setMaster($('#sites-check-all'), n, state.sites.length);
 }
 
 async function refreshSites(ids, withHtml) {
@@ -2418,6 +2657,7 @@ function renderCapResults(scope) {
 
     const nd = groups.filter((g) => view.selDomains.has(g.base)).length;
     const ni = ips.filter((i) => isIpv4(i.ip) && view.selIps.has(i.ip)).length;
+    const nIpv4 = ips.filter((i) => isIpv4(i.ip)).length;
     const empty = (text) => `<div class="empty">${text}</div>`;
     const waiting = cap.session?.running && !data.history;
     const filtered = view.query.trim() || view.newOnly;
@@ -2437,7 +2677,7 @@ function renderCapResults(scope) {
                 <header class="cap-card-head">
                     <span class="cap-card-icon">${ICONS.globe}</span><div><h2>Домены <span class="badge">${groups.length}${groups.length !== allGroups.length ? ` / ${allGroups.length}` : ''}</span></h2><small>Для DNS-списка · роутер сам обновляет IP</small></div>
                 </header>
-                <div class="cap-selection-bar"><button class="link-btn" data-action="cap-dom-all" ${attr} ${groups.length ? '' : 'disabled'}>Выбрать все</button><button class="link-btn" data-action="cap-dom-none" ${attr} ${view.selDomains.size ? '' : 'disabled'}>Снять</button><span>${nd ? `Выбрано: ${nd}` : 'Ничего не выбрано'}${hiddenSelection(view.selDomains.size, nd)}</span></div>
+                <div class="cap-selection-bar">${masterBox('cap-dom-all', nd, groups.length, 'Выбрать все домены', attr)}<span>${nd ? `Выбрано: ${nd} из ${groups.length}` : 'Ничего не выбрано'}${hiddenSelection(view.selDomains.size, nd)}</span></div>
                 <div class="cap-list" id="${prefix}-dom-list">${domRows || empty(filtered ? 'По этому фильтру домены не найдены' : waiting ? 'Пользуйтесь программой — домены появятся здесь' : 'Домены не найдены')}</div>
                 <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="domain-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-exact" data-cap-option="exact" ${attr} ${view.exact ? 'checked' : ''}><span></span></span>Добавлять отдельные поддомены</label><small>Обычно достаточно основного домена: он включает поддомены.</small></div><button class="btn primary" data-action="cap-dom-add" ${attr} ${nd ? '' : 'disabled'}>${ICONS.plus} В DNS-список${nd ? ` (${nd})` : ''}</button></footer>
             </section>
@@ -2445,12 +2685,13 @@ function renderCapResults(scope) {
                 <header class="cap-card-head">
                     <span class="cap-card-icon ip">${ICONS.router}</span><div><h2>IP-адреса <span class="badge">${ips.length}${ips.length !== data.ips.length ? ` / ${data.ips.length}` : ''}</span></h2><small>Для IP-маршрутов · полезно для адресов без домена</small></div>
                 </header>
-                <div class="cap-selection-bar"><button class="link-btn" data-action="cap-ip-all" ${attr} ${ips.some((i) => isIpv4(i.ip)) ? '' : 'disabled'}>Выбрать все</button><button class="link-btn" data-action="cap-ip-none" ${attr} ${view.selIps.size ? '' : 'disabled'}>Снять</button><span>${ni ? `Выбрано: ${ni}` : 'Ничего не выбрано'}${hiddenSelection(view.selIps.size, ni)}</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-nodomain" data-cap-option="noDomainOnly" ${attr} ${view.noDomainOnly ? 'checked' : ''}><span></span></span>Без домена</label></div>
+                <div class="cap-selection-bar">${masterBox('cap-ip-all', ni, nIpv4, 'Выбрать все IPv4-адреса', attr)}<span>${ni ? `Выбрано: ${ni} из ${nIpv4}` : 'Ничего не выбрано'}${hiddenSelection(view.selIps.size, ni)}</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-nodomain" data-cap-option="noDomainOnly" ${attr} ${view.noDomainOnly ? 'checked' : ''}><span></span></span>Без домена</label></div>
                 <div class="cap-list" id="${prefix}-ip-list">${ipRows || empty(filtered ? 'По этому фильтру IP не найдены' : waiting ? 'Пользуйтесь программой — IP появятся здесь' : view.noDomainOnly ? 'Адресов без домена не найдено' : 'Адреса не найдены')}</div>
                 <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="ip-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-agg" data-cap-option="agg24" ${attr} ${view.agg24 ? 'checked' : ''}><span></span></span>Объединять IP в подсети /24</label><small>Через туннель пойдут и соседние адреса серверов. Отключите, чтобы добавить только точные IP.</small></div><button class="btn primary" data-action="cap-ip-add" ${attr} ${ni ? '' : 'disabled'}>${ICONS.plus} В IP-маршруты${ni ? ` (${ni})` : ''}</button></footer>
             </section>
         </div>${waiting ? '<p class="cap-update-note muted">Адреса обновляются автоматически. Выбранные строки сохраняются; новые строки можно отметить отдельно.</p>' : ''}`);
     [`#${prefix}-dom-list`, `#${prefix}-ip-list`].forEach((s, i) => { const el = $(s); if (el) el.scrollTop = scroll[i]; });
+    syncPartial(box);
 }
 
 function renderCapHistory() {
@@ -2721,20 +2962,32 @@ document.addEventListener('paste', (e) => {
 
 let ctxMenu = null;
 
-function closeMenu() {
-    ctxMenu?.remove();
+/** trigger - элемент, нажатием на который меню закрыли (если закрыли кликом мимо меню). */
+function closeMenu(trigger = null) {
+    if (!ctxMenu) return;
+    const done = ctxMenu.onClose;
+    ctxMenu.remove();
     ctxMenu = null;
+    done?.(trigger);
 }
 
-function showMenu(x, y, items) {
+/**
+ * Всплывающее меню. Пункт: {label, run, hint, note, icon, checked, disabled, danger},
+ * '-' - разделитель, {title} - подпись группы. onClose вызывается при закрытии.
+ */
+function showMenu(x, y, items, onClose) {
     closeMenu();
     const menu = document.createElement('div');
     menu.className = 'ctx';
     menu.setAttribute('role', 'menu');
+    const marks = items.some((it) => it.checked !== undefined || it.icon);
     menu.innerHTML = items.map((it, i) => it === '-'
         ? '<div class="ctx-sep"></div>'
-        : `<button class="ctx-item${it.danger ? ' danger' : ''}" data-i="${i}" ${it.disabled ? 'disabled' : ''} role="menuitem">
-               <span>${esc(it.label)}</span>${it.hint ? `<kbd>${esc(it.hint)}</kbd>` : ''}</button>`).join('');
+        : it.title ? `<div class="ctx-title">${esc(it.title)}</div>`
+        : `<button class="ctx-item${it.danger ? ' danger' : ''}" data-i="${i}" ${it.disabled ? 'disabled' : ''} role="${it.checked !== undefined ? 'menuitemradio' : 'menuitem'}"${it.checked !== undefined ? ` aria-checked="${!!it.checked}"` : ''}>
+               <span>${marks ? `<span class="ctx-mark">${it.checked ? ICONS.check : it.icon || ''}</span>` : ''}${it.note
+                   ? `<span><b>${esc(it.label)}</b><small>${esc(it.note)}</small></span>` : esc(it.label)}</span>${it.hint ? `<kbd>${esc(it.hint)}</kbd>` : ''}</button>`).join('');
+    menu.onClose = onClose;
     document.body.append(menu);
     const { innerWidth: w, innerHeight: h } = window;
     const r = menu.getBoundingClientRect();
@@ -2750,11 +3003,11 @@ function showMenu(x, y, items) {
     ctxMenu = menu;
 }
 
-document.addEventListener('mousedown', (e) => { if (ctxMenu && !ctxMenu.contains(e.target)) closeMenu(); });
+document.addEventListener('mousedown', (e) => { if (ctxMenu && !ctxMenu.contains(e.target)) closeMenu(e.target); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); }, true);
-window.addEventListener('blur', closeMenu);
-window.addEventListener('resize', closeMenu);
-document.addEventListener('scroll', closeMenu, true);
+window.addEventListener('blur', () => closeMenu());
+window.addEventListener('resize', () => closeMenu());
+document.addEventListener('scroll', () => closeMenu(), true);
 
 function fieldMenu(field) {
     const range = [field.selectionStart ?? 0, field.selectionEnd ?? 0];
@@ -2820,6 +3073,53 @@ document.addEventListener('contextmenu', (e) => {
     else closeMenu();
 });
 
+// ============================================================ подсказки к кнопкам-значкам
+// Системная подсказка появляется через секунду; у кнопок без подписи показываем свою сразу.
+
+const TIP_TARGETS = '.icon-btn, .seg-btn, .select-all, .route-opts';
+let tipEl = null, tipOwner = null, tipTimer = 0;
+
+function hideTip() {
+    clearTimeout(tipTimer);
+    tipEl?.remove();
+    tipEl = tipOwner = null;
+}
+
+document.addEventListener('pointerover', (e) => {
+    const el = e.target.closest?.(TIP_TARGETS);
+    if (el === tipOwner) return;
+    hideTip();
+    if (!el || e.pointerType === 'touch') return;
+    if (el.hasAttribute('title')) {
+        el.dataset.tip = el.getAttribute('title');
+        el.removeAttribute('title');
+        if (!el.hasAttribute('aria-label') || el.dataset.tipLabel) {
+            el.setAttribute('aria-label', el.dataset.tip);
+            el.dataset.tipLabel = '1';
+        }
+    }
+    if (!el.dataset.tip) return;
+    tipOwner = el;
+    tipTimer = setTimeout(() => {
+        if (!el.isConnected) return;
+        tipEl = Object.assign(document.createElement('div'), { className: 'tip', textContent: el.dataset.tip });
+        tipEl.setAttribute('role', 'tooltip');
+        document.body.append(tipEl);
+        const r = el.getBoundingClientRect(), t = tipEl.getBoundingClientRect();
+        const below = r.bottom + 8 + t.height < window.innerHeight;
+        tipEl.style.top = `${below ? r.bottom + 8 : r.top - t.height - 8}px`;
+        tipEl.style.left = `${Math.max(6, Math.min(r.left + r.width / 2 - t.width / 2, window.innerWidth - t.width - 6))}px`;
+    }, 300);
+});
+document.addEventListener('pointerout', (e) => { if (tipOwner && !tipOwner.contains(e.relatedTarget)) hideTip(); });
+['pointerdown', 'keydown', 'scroll'].forEach((type) => document.addEventListener(type, hideTip, true));
+window.addEventListener('blur', hideTip);
+
+// Панель выбора прилипает под верхней панелью, высота которой зависит от ширины окна.
+new ResizeObserver(() => {
+    document.documentElement.style.setProperty('--topbar-h', `${Math.round($('.topbar').getBoundingClientRect().height)}px`);
+}).observe($('.topbar'));
+
 function openMoveEntry(from, entry) {
     const src = findGroup(from);
     openModal({
@@ -2862,7 +3162,8 @@ const actions = {
         root.dataset.theme = dark ? 'light' : 'dark';
         storage('s4r-theme', root.dataset.theme);
     },
-    settings: openSettings,
+    settings: () => openSettings(),
+    'router-menu': (el) => openRouterMenu(el),
     'dns-reload': () => loadOverview(),
     'group-new': () => openGroupCreate(),
     'group-edit': (el) => openGroupEdit(el.dataset.group),
@@ -2889,6 +3190,25 @@ const actions = {
         renderGroups();
     },
     'dns-clear-selection'() { state.groupSelected.clear(); renderGroups(); },
+    'dns-check-all'(el) {
+        if (el.checked) dnsShownGroups().forEach((g) => state.groupSelected.add(g.name));
+        else state.groupSelected.clear();
+        renderGroups();
+    },
+    'dns-select-all'() { state.groups.forEach((g) => state.groupSelected.add(g.name)); renderGroups(); },
+    'dns-collapse-all'(el) {
+        state.listOpen = el.dataset.collapse === '1' ? new Set() : new Set(state.groups.map((g) => g.name));
+        renderGroups();
+    },
+    'dns-enable-selected': () => setGroupsEnabled(true),
+    'dns-disable-selected': () => setGroupsEnabled(false),
+    'dns-move-selected': () => openMove({ groups: [...state.groupSelected], from: '' }),
+    'dns-copy-selected': () => copyText([...new Set(selectedGroups().flatMap((g) => g.entries))].join('\n')),
+    'dns-export-selected': () => {
+        const titles = selectedGroups().map((g) => g.title);
+        return exportFile({ groups: titles, ip: () => false, name: titles.length === 1 ? titles[0] : 'dns' }).catch((e) => toast(e.message, 'error'));
+    },
+    'dns-delete-selected': () => deleteSelectedGroups(),
     'dns-merge': () => openDnsMerge(),
     'group-export': (el) => {
         const g = findGroup(el.dataset.group);
@@ -2986,6 +3306,13 @@ const actions = {
         renderIpRoutes();
     },
     'ip-clear-selection'() { state.ipSelected.clear(); renderIpRoutes(); },
+    'ip-check-all'(el) {
+        if (el.checked) ipShownGroups().forEach((g) => g.shown.forEach((r) => state.ipSelected.add(r.index)));
+        else state.ipSelected.clear();
+        renderIpRoutes();
+    },
+    'ip-select-all'() { (state.ipRoutes || []).forEach((r) => state.ipSelected.add(r.index)); renderIpRoutes(); },
+    'ip-copy-selected': () => copyText((state.ipRoutes || []).filter((r) => state.ipSelected.has(r.index)).map((r) => r.destination).join('\n')),
     'ip-delete-selected': () => deleteIpRoutes([...state.ipSelected]),
     async 'ip-toggle'(el) {
         const enabled = el.checked;
@@ -3015,6 +3342,8 @@ const actions = {
     'sites-refresh': () => refreshSites([...state.sitesSelected], false),
     'sites-refresh-html': () => refreshSites([...state.sitesSelected], true),
     'sites-delete': () => deleteSites([...state.sitesSelected]),
+    'sites-select-all'() { state.sitesSelected = new Set(state.sites.map((s) => s.id)); renderSites(); },
+    'sites-clear-selection'() { state.sitesSelected.clear(); renderSites(); },
     'sites-to-list': () => openPickGroup([...new Set(state.sites.filter((s) => state.sitesSelected.has(s.id)).map((s) => s.domain))], 'Домены → DNS-список'),
     'sites-to-routes': () => openIpCreate('', [...state.sitesSelected]),
     'bat-download': () => downloadBats().catch(() => {}),
@@ -3112,17 +3441,17 @@ const actions = {
     'cap-dom-all'(el) {
         const scope = capScope(el), view = capResultView(scope), data = capData(scope);
         if (!data) return;
-        capShownResults(data, scope).groups.forEach((g) => view.selDomains.add(g.base));
+        if (el.checked === false) view.selDomains.clear();
+        else capShownResults(data, scope).groups.forEach((g) => view.selDomains.add(g.base));
         renderCapResults(scope);
     },
     'cap-ip-all'(el) {
         const scope = capScope(el), view = capResultView(scope), data = capData(scope);
         if (!data) return;
-        capShownResults(data, scope).ips.filter((i) => isIpv4(i.ip)).forEach((i) => view.selIps.add(i.ip));
+        if (el.checked === false) view.selIps.clear();
+        else capShownResults(data, scope).ips.filter((i) => isIpv4(i.ip)).forEach((i) => view.selIps.add(i.ip));
         renderCapResults(scope);
     },
-    'cap-dom-none'(el) { const scope = capScope(el); capResultView(scope).selDomains.clear(); renderCapResults(scope); },
-    'cap-ip-none'(el) { const scope = capScope(el); capResultView(scope).selIps.clear(); renderCapResults(scope); },
     'cap-dom-add': (el) => capAddDomains(capScope(el)),
     'cap-ip-add': (el) => capAddIps(capScope(el)),
     'cap-search-clear'(el) {

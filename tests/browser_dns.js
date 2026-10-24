@@ -2,6 +2,7 @@
 window.dnsTestRequests = [];
 window.fetch = async (url, opts = {}) => {
     let body = {success: true};
+    window.dnsLastHeaders = opts.headers || {};
     if (url === '/api/router/settings') body.settings = {has_password: false};
     else if (url === '/api/sites') body.sites = [];
     else if (url === '/api/router/overview') Object.assign(body, {system: {model: 'Тестовый роутер', release: '5.0'}, interfaces: [],
@@ -11,6 +12,12 @@ window.fetch = async (url, opts = {}) => {
         window.dnsTestRequests.push({url, payload});
         state.groups = state.groups.filter((g) => !payload.sources.includes(g.name));
         body.message = 'Объединено';
+    }
+    else if (url === '/api/router/dns-routes/toggle' || url === '/api/routers/select') {
+        const payload = JSON.parse(opts.body);
+        window.dnsTestRequests.push({url, payload, headers: opts.headers});
+        if (url === '/api/routers/select') body.settings = {...state.settings, active_router: payload.id, has_password: true};
+        else body.message = `Выключено правил: ${payload.indices.length}`;
     }
     else if (opts.method === 'DELETE' && url.endsWith('/entries')) {
         const payload = JSON.parse(opts.body);
@@ -160,6 +167,63 @@ window.addEventListener('load', async () => {
               && !state.groupSelected.size && $$('.glist-row', box).length === 2, 'Объединение отправляет основной и удаляемые списки');
         actions['dns-view']({dataset: {view: 'cards'}});
         check(!!$('.group', box) && !$('.glist', box) && storage('s4r-dns-view') === 'cards', 'Можно вернуться к карточкам');
+
+        // «Выбрать все» и массовое включение/выключение правил выбранных списков.
+        state.groups = [group(1, 3), group(2, 3), group(3, 3)];
+        state.groups[2].routes = [];
+        state.groupSelected.clear();
+        renderGroups();
+        const master = $('#dns-check-all');
+        check(!master.closest('.select-all').hidden && !master.checked && !master.indeterminate && $('#dns-bulk').hidden,
+              'Флажок «Выбрать все» виден, пока ничего не выбрано');
+        master.click();
+        check(state.groupSelected.size === 3 && master.checked && !$('#dns-bulk').hidden && $('#dns-select-all-link').hidden,
+              'Флажок выбирает все списки и показывает панель действий');
+        master.click();
+        check(!state.groupSelected.size && $('#dns-bulk').hidden, 'Повторный клик снимает выбор');
+        $('[data-action="group-select"]').click();
+        const link = $('#dns-select-all-link');
+        check(master.indeterminate && !link.hidden && link.textContent.includes('(3)') && $('#dns-bulk-count').textContent.includes('из 3'),
+              'При частичном выборе флажок «наполовину», есть ссылка «Выбрать все»');
+        link.click();
+        check(state.groupSelected.size === 3 && link.hidden, 'Ссылка «Выбрать все» выбирает все списки');
+        $('[data-action="dns-disable-selected"]').click();
+        for (let n = 0; n < 10 && state.groups[0].routes[0].enabled; n++) await tick();
+        const toggleCall = window.dnsTestRequests.find((r) => r.url === '/api/router/dns-routes/toggle');
+        check(toggleCall?.payload.enabled === false && toggleCall.payload.indices.map(String).join(',') === '1,2'
+              && state.groups.every((g) => g.routes.every((r) => !r.enabled)), 'Правила выбранных списков выключаются одним запросом');
+        check($('[data-action="dns-disable-selected"]').disabled && !$('[data-action="dns-enable-selected"]').disabled,
+              'Кнопки включения и выключения отражают состояние правил');
+        check($$('#dns-bulk .icon-btn').every((b) => !b.textContent.trim() && (b.title || b.dataset.tip)),
+              'Действия панели — значки с подсказками');
+
+        // Несколько роутеров: меню переключения и сброс данных прежнего роутера.
+        state.settings = {has_password: true, active_router: 'r1', routers: [
+            {id: 'r1', name: 'Дом', router_host: '192.168.1.1', has_password: true},
+            {id: 'r2', name: 'Дача', router_host: '192.168.2.1', has_password: true}]};
+        setConn('ok');
+        check($('#conn .conn-text').textContent === 'Дом', 'Кнопка роутера показывает название активного роутера');
+        $('#conn').click();
+        const items = $$('.ctx .ctx-item');
+        check(items.length === 4 && items[0].getAttribute('aria-checked') === 'true' && items[1].textContent.includes('Дача')
+              && items[1].textContent.includes('192.168.2.1'), 'Меню показывает роутеры и отмечает активный');
+        items[1].click();
+        for (let n = 0; n < 10 && state.settings.active_router !== 'r2'; n++) await tick();
+        await tick();
+        const select = window.dnsTestRequests.find((r) => r.url === '/api/routers/select');
+        check(select?.payload.id === 'r2' && select.headers['X-Router'] === 'r1', 'Переключение отправляет выбранный роутер');
+        check(state.settings.active_router === 'r2' && !state.groupSelected.size && window.dnsLastHeaders['X-Router'] === 'r2',
+              'После переключения выбор сброшен, данные запрашиваются у нового роутера');
+        check($('#conn .conn-text').textContent === 'Дача' && !$('.ctx'), 'Меню закрыто, на кнопке новый роутер');
+        $('#conn').click();
+        $$('.ctx .ctx-item').at(-1).click();
+        check($('#modal-root h2')?.textContent === 'Новый роутер' && $('#settings-form').name && !$('[data-delete-router]'),
+              'Пункт «Добавить роутер» открывает форму нового роутера');
+        $('#modal-root [data-close]').click();
+        $('#conn').click();
+        $$('.ctx .ctx-item').at(-2).click();
+        check($('#settings-form').router_host.value === '192.168.2.1' && !!$('[data-delete-router]'), 'Настройки открываются для активного роутера');
+        $('#modal-root [data-close]').click();
 
         const params = new URLSearchParams(location.search);
         if (params.has('preview')) {

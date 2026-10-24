@@ -22,7 +22,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Callable, Dict, List
 from urllib.parse import urlparse
 
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, abort
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, abort, has_request_context
 
 from services.database import Database
 from services.bat_generator import BatGenerator
@@ -90,7 +90,7 @@ capture = CaptureManager(CaptureStore(), launcher={
 atexit.register(capture.shutdown)  # результаты анализа сохраняются и при закрытии программы
 
 _router_lock = threading.Lock()
-_router_client = None
+_router_clients: Dict[str, KeeneticClient] = {}  # id роутера -> клиент с открытой сессией
 
 
 # === Защита локального API ===
@@ -198,25 +198,36 @@ def site_view(site: Dict) -> Dict:
     return site
 
 
+def router_id() -> str:
+    """Роутер текущего запроса: из заголовка X-Router (страница знает, с каким роутером работает) или активный."""
+    wanted = request.headers.get('X-Router', '') if has_request_context() else ''
+    return wanted if settings.has_router(wanted) else settings.active_id
+
+
 def router() -> KeeneticClient:
-    """Возвращает (и кэширует) клиент роутера по текущим настройкам."""
-    global _router_client
+    """Возвращает (и кэширует) клиент роутера текущего запроса."""
+    rid = router_id()
     with _router_lock:
-        if _router_client is None:
-            if not settings.get('router_password'):
+        client = _router_clients.get(rid)
+        if client is None:
+            config = settings.router(rid)
+            if not config['router_password']:
                 raise KeeneticAuthError('Укажите пароль роутера в настройках')
-            _router_client = KeeneticClient(
-                settings.get('router_host'),
-                settings.get('router_login'),
-                settings.get('router_password'),
-            )
-        return _router_client
+            client = _router_clients[rid] = KeeneticClient(
+                config['router_host'], config['router_login'], config['router_password'])
+        return client
 
 
-def reset_router():
-    global _router_client
+def reset_router(rid: str = None):
     with _router_lock:
-        _router_client = None
+        if rid is None:
+            _router_clients.clear()
+        else:
+            _router_clients.pop(rid, None)
+
+
+def remember_interface(interface: str):
+    settings.update(router_id(), default_interface=interface)
 
 
 def refresh_site_ips(sites: List[Dict], with_html: bool) -> List[Dict]:
@@ -441,26 +452,51 @@ def router_settings():
 @app.route('/api/router/settings', methods=['PUT'])
 @api
 def router_settings_save():
+    """Сохраняет роутер: id - существующий, new - добавить ещё один, иначе - активный."""
     data = body()
-    values = {k: data.get(k) for k in ('router_host', 'router_login', 'default_interface')
+    values = {k: data.get(k) for k in ('name', 'router_host', 'router_login', 'default_interface')
               if data.get(k) is not None}
     if data.get('router_password'):
         values['router_password'] = data['router_password']
     if data.get('forget_password'):
         values['router_password'] = ''
-    settings.update(**values)
-    reset_router()
+    rid = None if data.get('new') else (data.get('id') or settings.active_id or None)
+    rid = settings.save_router(rid, **values)
+    if data.get('id') and not data.get('new'):
+        settings.select(rid)  # настройки сохраняют для роутера, с которым дальше работают
+    reset_router(rid)
     message = 'Сохранённый пароль удалён' if data.get('forget_password') else 'Настройки сохранены'
-    return jsonify({'success': True, 'settings': settings.public(), 'message': message})
+    return jsonify({'success': True, 'settings': settings.public(), 'id': rid, 'message': message})
+
+
+@app.route('/api/routers/select', methods=['POST'])
+@api
+def routers_select():
+    settings.select(str(body().get('id') or ''))
+    return jsonify({'success': True, 'settings': settings.public(),
+                    'message': f"Роутер: {settings.get('name') or settings.get('router_host')}"})
+
+
+@app.route('/api/routers/delete', methods=['POST'])
+@api
+def routers_delete():
+    rid = str(body().get('id') or '')
+    settings.delete_router(rid)
+    reset_router(rid)
+    return jsonify({'success': True, 'settings': settings.public(), 'message': 'Роутер удалён из программы'})
 
 
 @app.route('/api/router/test', methods=['POST'])
 @api
 def router_test():
-    reset_router()
+    rid = router_id()
+    reset_router(rid)
     client = router()
     client.authenticate()
-    return jsonify({'success': True, 'system': client.system_info(),
+    system = client.system_info()
+    if not settings.router(rid)['name'] and system.get('model'):
+        settings.update(rid, name=system['model'])  # безымянный роутер называем по модели
+    return jsonify({'success': True, 'system': system, 'settings': settings.public(),
                     'message': 'Подключение к роутеру установлено'})
 
 
@@ -486,7 +522,7 @@ def router_overview():
 
     return jsonify({'success': True, 'system': system, 'interfaces': interfaces,
                     'groups': result_groups, 'limit': MAX_GROUP_ENTRIES,
-                    'default_interface': settings.get('default_interface')})
+                    'default_interface': settings.router(router_id())['default_interface']})
 
 
 @app.route('/api/router/groups', methods=['POST'])
@@ -502,7 +538,7 @@ def router_group_create():
                                   auto=bool(data.get('auto', True)),
                                   reject=bool(data.get('reject', False)))
     if interface:
-        settings.update(default_interface=interface)
+        remember_interface(interface)
     return jsonify({'success': True, 'group': group.to_dict(),
                     'message': f'Список «{title}» создан, записей: {len(entries)}'})
 
@@ -577,16 +613,22 @@ def router_dns_route_add():
         raise ValueError('Нужны список и интерфейс')
     router().add_dns_route(data['group'], data['interface'],
                            auto=bool(data.get('auto', True)), reject=bool(data.get('reject', False)))
-    settings.update(default_interface=data['interface'])
+    remember_interface(data['interface'])
     return jsonify({'success': True, 'message': 'Правило маршрутизации добавлено'})
 
 
 @app.route('/api/router/dns-routes/toggle', methods=['POST'])
 @api
 def router_dns_route_toggle():
+    """Включает/выключает одно правило (index) или сразу несколько (indices)."""
     data = body()
-    router().set_dns_route_enabled(str(data.get('index', '')), bool(data.get('enabled')))
-    return jsonify({'success': True, 'message': 'Правило включено' if data.get('enabled') else 'Правило выключено'})
+    indices = [str(i) for i in data.get('indices') or []] or [str(data.get('index', ''))]
+    enabled = bool(data.get('enabled'))
+    n = router().set_dns_routes_enabled(indices, enabled)
+    if 'indices' not in data:
+        return jsonify({'success': True, 'changed': n, 'message': 'Правило включено' if enabled else 'Правило выключено'})
+    word = 'Включено' if enabled else 'Выключено'
+    return jsonify({'success': True, 'changed': n, 'message': f'{word} правил: {n}'})
 
 
 @app.route('/api/router/dns-routes/update', methods=['POST'])
@@ -615,7 +657,7 @@ def router_dns_routes_move():
     if not data.get('interface'):
         raise ValueError('Выберите интерфейс')
     moved = router().move_dns_routes([str(i) for i in data.get('indices') or []], data['interface'])
-    settings.update(default_interface=data['interface'])
+    remember_interface(data['interface'])
     return jsonify({'success': True, 'moved': moved, 'message': f'Переведено правил: {moved}'})
 
 
@@ -763,7 +805,7 @@ def router_move():
     moved_dns = client.move_dns_routes(dns_indices, interface) if dns_indices else 0
     ip_indices = [str(i) for i in data.get('ip_indices') or []]
     moved_ip = client.move_ip_routes(ip_indices, interface) if ip_indices else 0
-    settings.update(default_interface=interface)
+    remember_interface(interface)
     return jsonify({'success': True, 'dns': moved_dns, 'ip': moved_ip,
                     'message': f'Переведено: правил {moved_dns}, IP-маршрутов {moved_ip}'})
 

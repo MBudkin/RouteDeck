@@ -89,8 +89,13 @@ window.addEventListener('load', async () => {
         for (let n = 0; n < 40; n++) { cap.session.results.ips[0].count++; renderCapResults(); }
         assert(checkbox === $('[data-cap-dom="discord.com"]') && document.activeElement === checkbox && checkbox.checked,
                'Обновления сохраняют checkbox, фокус и выбор');
-        $('[data-action="cap-dom-none"]').click();
-        assert(cap.selDomains.size === 0 && !checkbox.checked, 'Снять всё работает после обновлений');
+        const master = $('[data-action="cap-dom-all"]');
+        assert(master.checked && !master.indeterminate && master.closest('.select-all'), 'Флажок «Выбрать все» отмечен, когда выбраны все домены');
+        master.click();
+        assert(cap.selDomains.size === 0 && !checkbox.checked && !$('[data-action="cap-dom-all"]').checked, 'Снятие флажка «Выбрать все» снимает выбор после обновлений');
+        checkbox.click();
+        assert($('[data-action="cap-dom-all"]').indeterminate, 'Частичный выбор доменов отображается флажком «наполовину»');
+        checkbox.click();
         $('[data-action="cap-ip-all"]').click();
         assert(cap.selIps.size === 2 && !cap.selIps.has('2606:4700:4700::1111'), 'Выбрать IP отмечает IPv4, IPv6 остаётся недоступным');
         cap.noDomainOnly = true;
@@ -178,7 +183,7 @@ window.addEventListener('load', async () => {
         archiveSearch.dispatchEvent(new Event('input', {bubbles: true}));
         assert($$('[data-cap-dom]', archived).length === 1 && $('#cap-dom-list').children.length === 3 && !cap.query,
                'Поиск в истории фильтрует только сохранённые результаты');
-        $('[data-action="cap-dom-none"]', archived).click();
+        $('[data-action="cap-dom-all"]', archived).click();
         assert(!cap.archive.selDomains.size && cap.selDomains.size === 3, 'Снятие выбора истории не затрагивает текущий выбор');
         archiveSearch.focus();
         renderCapHistory();

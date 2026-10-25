@@ -244,6 +244,78 @@ window.addEventListener('load', async () => {
         ipMaster.click();
         assert(!state.ipSelected.size && $('#ip-bulk').hidden, 'Снятие флажка снимает выбор');
 
+        // Повторы IP: точные повторы, адреса внутри подсетей и один адрес через разные подключения.
+        const savedRoutes = ipFixture.routes;
+        const r = (index, destination, comment, iface, extra = {}) => ({index, destination, comment, interface: iface,
+            interface_title: ipFixture.interfaces.find((i) => i.id === iface).description, enabled: true, auto: true, ...extra});
+        ipFixture.routes = [
+            r('11', '91.108.4.0/22', 'Telegram', 'Wireguard0'),
+            r('12', '91.108.4.10/32', 'Telegram', 'Wireguard0'),        // внутри /22 с тем же VPN - лишний
+            r('13', '91.108.4.20/32', 'Discord', 'Wireguard1'),         // внутри /22, но через другой VPN - нужен
+            r('14', '149.154.160.0/20', 'Telegram', 'Wireguard0'),
+            r('15', '149.154.160.0/20', 'Старые', 'Wireguard1'),        // тот же адрес через другой VPN - конфликт
+            r('16', '5.5.5.5/32', '', 'Wireguard0'),                    // точный повтор 17 без описания
+            r('17', '5.5.5.5/32', 'Discord', 'Wireguard0'),
+            r('18', '91.108.5.30/32', 'Telegram', 'Wireguard0'),        // ближайшая подсеть /24 идёт через другой VPN
+            r('19', '91.108.5.0/24', 'Discord', 'Wireguard1'),
+            r('20', '8.8.8.0/24', 'Telegram', 'Wireguard0', {enabled: false}),
+            r('21', '8.8.8.8/32', 'Telegram', 'Wireguard0'),            // широкая подсеть выключена - нужен
+        ];
+        state.ipSelected.clear();
+        invalidateIpRoutes();
+        await loadIpRoutes();
+        const notes = ipDuplicates();
+        const kinds = Object.fromEntries([...notes].map(([i, n]) => [i, n.kind]));
+        assert(JSON.stringify(kinds) === JSON.stringify({16: 'same', 14: 'conflict', 15: 'conflict', 12: 'covered'}),
+               'Повторы определены точно: лишние, конфликты подключений и нужные узкие маршруты различаются');
+        const dupsBtn = $('#ip-dups-btn');
+        assert(!dupsBtn.hidden && dupsBtn.textContent.includes('Повторы: 3'), 'На панели IP видна кнопка с числом повторов');
+        assert(!!$('[data-ip="12"] .ip-dup-mark.covered') && !!$('[data-ip="15"] .ip-dup-mark.conflict') && $('[data-ip="16"] .ip-dest').title.includes('повтор')
+               && !$('[data-ip="13"] .ip-dup-mark') && !$('[data-ip="21"] .ip-dup-mark'), 'Строки маршрутов отмечены метками повторов с пояснением');
+        const cleanLink = $('[data-action="ipg-clean"][data-comment="Telegram"]');
+        assert(cleanLink?.textContent.includes('убрать лишние: 1') && $('.ipg[data-comment="Старые"] .ipg-meta').textContent.includes('повторов: 1'),
+               'В заголовке группы есть «убрать лишние» и число конфликтов');
+
+        dupsBtn.click();
+        const dupForm = $('#ip-dups-form');
+        const dupSubmit = $('#modal-root .modal-foot .danger');
+        assert(dupForm && $$('.ip-dup-set', dupForm).length === 1 && $('.ip-dup-set input[value="14"]', dupForm).checked
+               && $$('input[name="x"]:checked', dupForm).length === 2 && dupSubmit.textContent.includes('Удалить 3 маршрута'),
+               'Окно повторов предлагает оставить маршрут основной группы и удалить лишние');
+        $('.ip-dup-set input[value=""]', dupForm).click();
+        assert(dupSubmit.textContent.includes('Удалить 2 маршрута'), '«Оставить все» исключает конфликт из удаления');
+        $('.ip-dup-set input[value="15"]', dupForm).click();
+        dupForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#ip-dups-form'); n++) await tick();
+        await tick();
+        const dropped = ipFixture.requests.filter((x) => x.url === '/api/router/ip-routes/delete').pop().payload.indices;
+        assert(JSON.stringify([...dropped].sort()) === JSON.stringify(['12', '14', '16']) && !$('#ip-dups-form'),
+               'Удаляются выбранный конфликтующий маршрут и лишние повторы');
+        assert($('#ip-dups-btn').hidden && !ipDuplicates().size && $$('.ip-row').length === 8, 'После удаления повторов кнопка скрывается');
+
+        ipFixture.routes.push(r('12', '91.108.4.10/32', 'Telegram', 'Wireguard0'));
+        invalidateIpRoutes();
+        await loadIpRoutes();
+        const realConfirm = confirmDialog;
+        confirmDialog = async () => true;
+        $('[data-action="ipg-clean"][data-comment="Telegram"]').click();
+        for (let n = 0; n < 20 && ipGroupRoutes('Telegram').some((x) => x.index === '12'); n++) await tick();
+        assert(JSON.stringify(ipFixture.requests.filter((x) => x.url === '/api/router/ip-routes/delete').pop().payload.indices) === JSON.stringify(['12'])
+               && !$('[data-action="ipg-clean"]'), '«Убрать лишние» в группе удаляет только её лишние маршруты');
+        confirmDialog = realConfirm;
+
+        $('[data-action="ip-new"]').click();
+        const addForm = $('#ip-form');
+        addForm.dest.value = '91.108.4.10\n91.108.6.1\n149.154.160.0/20\n1.2.3.4\n1.2.3.4/32';
+        addForm.dest.dispatchEvent(new Event('input', {bubbles: true}));
+        const addPreview = $('#ip-preview').textContent;
+        assert(addPreview.includes('3 новых адреса') && addPreview.includes('уже на роутере: 1') && addPreview.includes('входят в подсети на роутере: 2'),
+               'При добавлении видно, какие адреса уже есть на роутере или входят в его подсети');
+        closeModal();
+        ipFixture.routes = savedRoutes;
+        invalidateIpRoutes();
+        await loadIpRoutes();
+
         const preview = new URLSearchParams(location.search);
         if (preview.has('preview')) {
             const still = document.createElement('style');

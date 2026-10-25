@@ -551,6 +551,25 @@ input[type=checkbox]:not(.switch input) { width: 16px; height: 16px; accent-colo
 /* Группа включена частично: переключатель «наполовину» */
 .switch.partial input:checked + span { background: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); }
 .ipg.all-off .ipg-toggle b { color: var(--text-3); text-decoration: line-through; }
+/* Повторы IP: лишние маршруты бледнее, конфликт подключений - предупреждением */
+.ip-row.dup-same .ip-dest, .ip-row.dup-covered .ip-dest { color: var(--text-3); }
+.ip-dup-mark { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin: 0 6px 1px 0; vertical-align: middle; background: var(--text-3); }
+.ip-dup-mark.conflict { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.ip-row.dup-conflict .ip-dest { color: var(--warn); }
+.ip-row .ip-dest[title] { cursor: help; }
+.ipg-clean { flex: none; font-size: 12px; white-space: nowrap; }
+.toolbar > .ip-dups-btn { height: 42px; border-radius: 12px; margin-left: auto; color: var(--warn); box-shadow: var(--shadow); }
+.toolbar > .ip-dups-btn:not([hidden]) + .icon-btn { margin-left: 0; }
+.ip-dups .small { font-size: 12.5px; margin: -4px 0 10px; }
+.ip-dups h3 { display: flex; align-items: center; gap: 8px; }
+.ip-dups-sets { display: flex; flex-direction: column; gap: 10px; max-height: 340px; overflow: auto; }
+.ip-dup-set { margin: 0; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: 12px; }
+.ip-dup-set legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+.modes.compact { gap: 6px; }
+.modes.compact label { padding: 8px 12px; }
+.ip-dups-extra { max-height: 240px; }
+.ip-dups-extra label > span:not(.count) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ip-dups .preview { margin: 12px 0 4px; }
 @media (max-width: 760px) {
     .ipg-head { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     .ipg-toggle { flex-basis: calc(100% - 80px); }
@@ -668,6 +687,13 @@ input[type=checkbox]:not(.switch input) { width: 16px; height: 16px; accent-colo
 .cap-selection-bar .switch-label { font-size: 11.5px; }
 .cap-selection-bar .link-btn { font-size: 11.5px; }
 .cap-selection-bar .link-btn:disabled { opacity: .4; cursor: default; text-decoration: none; }
+.cap-selection-bar > .cap-router-actions { display: inline-flex; align-items: center; gap: 12px; margin-right: 0; }
+.link-btn.danger-link { color: var(--danger); }
+.cap-row-menu { flex: none; margin: -4px -6px -4px 0; color: var(--text-3); }
+.cap-row-menu:hover { color: var(--text); }
+.confirm-list { display: block; margin: 10px 0; max-height: 260px; overflow: auto; font-size: 13px; }
+.confirm-list > span { display: block; padding: 3px 0; }
+.confirm-list + .muted { display: block; font-size: 12.5px; }
 .cap-card-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 12px 14px; border-top: 1px solid var(--border); }
 .cap-card-foot .btn { flex: none; }
 .cap-add-options { min-width: 0; font-size: 12px; color: var(--text-2); }

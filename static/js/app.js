@@ -26,6 +26,7 @@ const ICONS = {
     swap: '<svg viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></svg>',
     collapseAll: '<svg viewBox="0 0 24 24"><path d="m7 20 5-5 5 5M7 4l5 5 5-5"/></svg>',
     expandAll: '<svg viewBox="0 0 24 24"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>',
+    more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>',
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
 };
 
@@ -1864,6 +1865,7 @@ function renderIpRoutes() {
     $('[data-action="ip-enable-selected"]').disabled = selected.every((r) => r.enabled);
     $('[data-action="ip-disable-selected"]').disabled = !selected.some((r) => r.enabled);
     $('#ip-collapse-all').hidden = true;
+    $('#ip-dups-btn').hidden = true;
     const master = $('#ip-check-all');
     master.closest('.select-all').hidden = !state.connected || !all.length;
     setMaster(master, 0, 0);
@@ -1891,6 +1893,8 @@ function renderIpRoutes() {
         return;
     }
 
+    const dups = ipDuplicates(all);
+    renderIpDupsButton(all, dups);
     const groups = ipShownGroups(all, q);
 
     if (!groups.length) {
@@ -1915,6 +1919,8 @@ function renderIpRoutes() {
         const sel = g.routes.filter((r) => state.ipSelected.has(r.index)).length;
         const ifaces = [...new Set(g.routes.map((r) => r.interface_title))];
         const off = g.routes.filter((r) => !r.enabled).length;
+        const extra = g.routes.filter((r) => dups.get(r.index)?.removable).length;
+        const conflicts = g.routes.filter((r) => dups.get(r.index)?.kind === 'conflict').length;
         return `
         <section class="ipg card${isCollapsed ? ' collapsed' : ''}${off === g.routes.length ? ' all-off' : ''}" data-comment="${esc(key)}" data-render-key="ip-group:${esc(ckey(key))}">
             <header class="ipg-head">
@@ -1925,8 +1931,9 @@ function renderIpRoutes() {
                     <svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
                     <b class="${g.comment ? '' : 'muted'}">${esc(g.title)}</b>
                     <span class="badge">${g.routes.length}</span>
-                    <span class="muted ipg-meta">${esc(ifaces.join(', '))}${off ? ` · выключено ${off}` : ''}</span>
+                    <span class="muted ipg-meta">${esc(ifaces.join(', '))}${off ? ` · выключено ${off}` : ''}${conflicts ? ` · <span class="warn-text">повторов: ${conflicts}</span>` : ''}</span>
                 </button>
+                ${extra ? `<button class="link-btn ipg-clean" data-action="ipg-clean" data-comment="${esc(key)}" title="Маршруты, которые повторяют другие маршруты с тем же подключением">убрать лишние: ${extra}</button>` : ''}
                 <div class="ipg-actions">
                     <button class="icon-btn sm plain ipg-add" data-action="ipg-add" data-comment="${esc(key)}" title="Добавить IP в эту группу" aria-label="Добавить IP в группу ${esc(g.title)}">${ICONS.plus}</button>
                     <button class="icon-btn sm plain" data-action="ipg-rename" data-comment="${esc(key)}" title="${g.comment ? 'Переименовать группу' : 'Задать описание'}">${ICONS.edit}</button>
@@ -1937,14 +1944,17 @@ function renderIpRoutes() {
                 </div>
             </header>
             <div class="ipg-body">
-                ${g.shown.map((r) => `
-                <div class="ip-row${state.ipSelected.has(r.index) ? ' selected' : ''}${r.enabled ? '' : ' off'}" data-ip="${esc(r.index)}" data-render-key="ip-route:${esc(r.index)}">
+                ${g.shown.map((r) => {
+                    const note = dups.get(r.index);
+                    return `
+                <div class="ip-row${state.ipSelected.has(r.index) ? ' selected' : ''}${r.enabled ? '' : ' off'}${note ? ` dup-${note.kind}` : ''}" data-ip="${esc(r.index)}" data-render-key="ip-route:${esc(r.index)}">
                     <input type="checkbox" data-action="ip-select" data-index="${esc(r.index)}" ${state.ipSelected.has(r.index) ? 'checked' : ''}>
                     <label class="switch" title="${r.enabled ? 'Выключить' : 'Включить'}"><input type="checkbox" data-action="ip-toggle" data-index="${esc(r.index)}" ${r.enabled ? 'checked' : ''}><span></span></label>
-                    <span class="mono ip-dest">${esc(r.destination)}</span>
+                    <span class="mono ip-dest"${note ? ` title="${esc(`${r.destination} — ${note.text}`)}"` : ''}>${note ? `<i class="ip-dup-mark ${note.kind}" aria-label="${note.label}"></i>` : ''}${esc(r.destination)}</span>
                     <span class="ip-iface">${esc(r.interface_title || r.gateway)}</span>
                     <span class="tags">${r.auto ? '<span class="tag">авто</span>' : ''}${r.reject ? '<span class="tag warn">эксклюзивный</span>' : ''}</span>
-                </div>`).join('')}
+                </div>`;
+                }).join('')}
             </div>
         </section>`;
     }).join(''));
@@ -2112,8 +2122,13 @@ function openIpCreate(prefill = '', siteIds = null, comment = '', preset = {}) {
             if (preset.chooseInterface) f.interface.value = '';
             if (f.dest) {
                 const upd = () => {
-                    const n = parseRouteText(f.dest.value).length;
-                    $('#ip-preview', el).innerHTML = n ? `<span class="good">${n} ${plural(n, 'адрес', 'адреса', 'адресов')}</span>` : '';
+                    const { fresh, existing, inside } = ipAddCheck(parseRouteText(f.dest.value));
+                    const n = fresh.length + existing.length + inside.length;
+                    $('#ip-preview', el).innerHTML = n ? [
+                        `<span class="good">${fresh.length + inside.length} ${plural(fresh.length + inside.length, 'новый адрес', 'новых адреса', 'новых адресов')}</span>`,
+                        existing.length ? `<span title="${esc(existing.join('\n'))}">уже на роутере: ${existing.length} — будут пропущены</span>` : '',
+                        inside.length ? `<span title="${esc(inside.map((x) => `${x.cidr} — в ${x.by.destination} ${routeGroupTitle(x.by)}`).join('\n'))}">входят в подсети на роутере: ${inside.length}</span>` : '',
+                    ].filter(Boolean).join(' · ') : '';
                 };
                 f.dest.addEventListener('input', upd);
                 upd();
@@ -2152,6 +2167,228 @@ function parseRouteText(text) {
         for (const token of line.split(/[\s,;]+/)) if (isIp(token)) out.push(token);
     }
     return [...new Set(out)];
+}
+
+// ============================================================ IP-маршруты: повторы
+
+const intToIp = (n) => [24, 16, 8, 0].map((s) => Math.floor(n / 2 ** s) % 256).join('.');
+
+/** CIDR или одиночный IP -> {start, end, bits, cidr}; null, если это не IPv4. */
+function cidrRange(value) {
+    const [addr, raw = '32'] = String(value).trim().split('/');
+    const bits = +raw;
+    if (!isIpv4(addr) || !/^\d{1,2}$/.test(raw) || bits > 32) return null;
+    const size = 2 ** (32 - bits);
+    const start = Math.floor(ipInt(addr) / size) * size;
+    return { start, end: start + size - 1, bits, cidr: `${intToIp(start)}/${bits}` };
+}
+
+/** Подключение маршрута: маршруты с одинаковым подключением ведут трафик одинаково. */
+const routeVia = (r) => `${r.interface || ''}|${r.gateway || ''}`;
+const routeGroupTitle = (r) => `«${r.comment || 'Без описания'}»`;
+const routeIfaceTitle = (r) => r.interface_title || r.interface || r.gateway || 'без интерфейса';
+
+/**
+ * Повторы среди IP-маршрутов: index -> {kind, label, text, removable, by}.
+ *  - same: такой же адрес через то же подключение уже есть в другой записи;
+ *  - covered: адрес входит в более широкую подсеть с тем же подключением;
+ *  - conflict: тот же адрес направлен через разные подключения — роутер выберет
+ *    один маршрут, а какой нужен, решает пользователь.
+ * same и covered удаляются без изменения маршрутизации (removable).
+ */
+function ipDuplicates(routes = state.ipRoutes || []) {
+    const notes = new Map();
+    const size = new Map();
+    routes.forEach((r) => size.set(ckey(r.comment), (size.get(ckey(r.comment)) || 0) + 1));
+    const order = new Map(routes.map((r, i) => [r.index, i]));
+    // Какую из одинаковых записей оставить: включённую, с описанием, из большей группы, более раннюю.
+    const better = (a, b) => (b.enabled - a.enabled) || (!a.comment - !b.comment)
+        || (size.get(ckey(b.comment)) - size.get(ckey(a.comment))) || (order.get(a.index) - order.get(b.index));
+    const items = routes.map((r) => ({ r, range: cidrRange(r.destination) })).filter((x) => x.range && x.range.bits > 0);
+
+    const byDest = new Map();
+    for (const x of items) {
+        const list = byDest.get(x.range.cidr) || [];
+        list.push(x);
+        byDest.set(x.range.cidr, list);
+    }
+    for (const same of byDest.values()) {
+        same.sort((a, b) => better(a.r, b.r));
+        const perVia = new Map();
+        for (const x of same) {
+            const keep = perVia.get(routeVia(x.r));
+            if (keep) {
+                notes.set(x.r.index, { kind: 'same', label: 'повтор', removable: true, by: keep.r.index,
+                    text: `повтор: такой же маршрут уже есть в группе ${routeGroupTitle(keep.r)}` });
+            } else perVia.set(routeVia(x.r), x);
+        }
+        if (perVia.size > 1) {
+            const vias = [...perVia.values()];
+            for (const x of vias) {
+                const others = vias.filter((o) => o !== x).map((o) => `${routeIfaceTitle(o.r)} (${routeGroupTitle(o.r)})`);
+                notes.set(x.r.index, { kind: 'conflict', label: 'повтор', removable: false, peers: vias.map((o) => o.r.index),
+                    text: `тот же адрес направлен и через ${others.join(', ')} — оставьте один маршрут` });
+            }
+        }
+    }
+
+    // Адрес внутри подсети: решает ближайшая (самая узкая) подсеть, в которую он входит.
+    // Если она идёт через то же подключение, узкий маршрут ничего не меняет. Выключенные
+    // маршруты на трафик не влияют; маршрут по умолчанию (/0) не учитываем.
+    for (const x of items) {
+        if (notes.has(x.r.index)) continue;
+        for (let bits = x.range.bits - 1; bits > 0; bits--) {
+            const around = (byDest.get(cidrRange(`${intToIp(x.range.start)}/${bits}`).cidr) || [])
+                .filter((o) => o.r.enabled || !x.r.enabled);
+            if (!around.length) continue;
+            const wide = around[0];
+            if (around.every((o) => routeVia(o.r) === routeVia(x.r))) {
+                notes.set(x.r.index, { kind: 'covered', label: 'лишний', removable: true, by: wide.r.index,
+                    text: `лишний: уже покрывается ${wide.r.destination} в группе ${routeGroupTitle(wide.r)}` });
+            }
+            break;
+        }
+    }
+    return notes;
+}
+
+/** Наборы маршрутов с одним адресом через разные подключения: [{cidr, routes, keep}]. */
+function ipConflicts(routes = state.ipRoutes || [], notes = ipDuplicates(routes)) {
+    const byIndex = new Map(routes.map((r) => [r.index, r]));
+    const sets = new Map();
+    for (const r of routes) {
+        const note = notes.get(r.index);
+        // peers упорядочены от лучшего маршрута: его и предлагаем оставить.
+        if (note?.kind === 'conflict' && !sets.has(note.peers[0])) {
+            sets.set(note.peers[0], { cidr: cidrRange(r.destination).cidr, routes: note.peers.map((i) => byIndex.get(i)), keep: note.peers[0] });
+        }
+    }
+    return [...sets.values()].sort((a, b) => cidrRange(a.cidr).start - cidrRange(b.cidr).start || cidrRange(a.cidr).bits - cidrRange(b.cidr).bits);
+}
+
+/** Адреса для добавления против маршрутов роутера: новые, уже есть, входят в существующую подсеть. */
+function ipAddCheck(list, routes = state.ipRoutes || []) {
+    const have = new Map();
+    routes.forEach((r) => { const x = cidrRange(r.destination); if (x && x.bits > 0 && !have.has(x.cidr)) have.set(x.cidr, r); });
+    const fresh = [], existing = [], inside = [], seen = new Set();
+    for (const value of list) {
+        const x = cidrRange(value);
+        if (!x || seen.has(x.cidr)) continue;
+        seen.add(x.cidr);
+        if (have.has(x.cidr)) { existing.push(x.cidr); continue; }
+        let by = null;
+        for (let bits = x.bits - 1; bits > 0 && !by; bits--) by = have.get(cidrRange(`${intToIp(x.start)}/${bits}`).cidr);
+        if (by) inside.push({ cidr: x.cidr, by });
+        else fresh.push(x.cidr);
+    }
+    return { fresh, existing, inside };
+}
+
+/** Кнопка «Повторы» на панели IP: видна, только когда есть что проверить. */
+function renderIpDupsButton(routes, notes) {
+    const btn = $('#ip-dups-btn');
+    const sets = ipConflicts(routes, notes).length;
+    const extra = routes.filter((r) => notes.get(r.index)?.removable).length;
+    btn.hidden = !sets && !extra;
+    $('span', btn).textContent = `Повторы: ${sets + extra}`;
+    btn.title = [sets && `${sets} ${plural(sets, 'адрес направлен', 'адреса направлены', 'адресов направлены')} через разные подключения`,
+                 extra && `${extra} ${plural(extra, 'лишний маршрут', 'лишних маршрута', 'лишних маршрутов')}`].filter(Boolean).join(', ') + ' — проверить и удалить';
+}
+
+/** Удаление повторов: конфликты разрешаются выбором, лишние маршруты удаляются целиком. */
+function openIpDuplicates() {
+    const routes = state.ipRoutes || [];
+    const notes = ipDuplicates(routes);
+    const conflicts = ipConflicts(routes, notes);
+    const extra = routes.filter((r) => notes.get(r.index)?.removable);
+    if (!conflicts.length && !extra.length) return toast('Повторяющихся IP-маршрутов нет', 'success', { timeout: 2500 });
+    const byIndex = new Map(routes.map((r) => [r.index, r]));
+    const routeLine = (r) => `${esc(routeGroupTitle(r))} · ${esc(routeIfaceTitle(r))}${r.enabled ? '' : ' · <span class="warn-text">выключен</span>'}`;
+    openModal({
+        title: 'Повторяющиеся IP-маршруты',
+        size: 'lg',
+        body: `
+            <form id="ip-dups-form" class="ip-dups">
+                <p class="muted">Один и тот же адрес может попасть на роутер несколько раз — из разных групп, импорта или анализа программ. Отметьте, что удалить: остальные маршруты не изменятся.</p>
+                ${conflicts.length ? `
+                <h3>Один адрес — разные подключения <span class="badge">${conflicts.length}</span></h3>
+                <p class="muted small">Роутер использует только один из таких маршрутов. Выберите, какой оставить.</p>
+                <div class="ip-dups-sets">${conflicts.map((set, i) => `
+                    <fieldset class="ip-dup-set">
+                        <legend class="mono">${esc(set.cidr)}</legend>
+                        <div class="modes compact">
+                            ${set.routes.map((r) => `<label><input type="radio" name="c${i}" value="${esc(r.index)}" ${r.index === set.keep ? 'checked' : ''}><div><b>Оставить через ${esc(routeIfaceTitle(r))}</b><small>${routeLine(r)}</small></div></label>`).join('')}
+                            <label><input type="radio" name="c${i}" value=""><div><b>Оставить все</b><small>Ничего не удалять</small></div></label>
+                        </div>
+                    </fieldset>`).join('')}
+                </div>` : ''}
+                ${extra.length ? `
+                <h3>Лишние маршруты <span class="badge">${extra.length}</span></h3>
+                <p class="muted small">Такой же адрес или подсеть с тем же подключением уже есть — после удаления трафик пойдёт так же.</p>
+                <div class="checks scroll ip-dups-extra">${extra.map((r) => {
+                    const by = byIndex.get(notes.get(r.index).by);
+                    return `<label><input type="checkbox" name="x" value="${esc(r.index)}" checked>
+                        <span><span class="mono">${esc(r.destination)}</span> <small class="muted">${routeLine(r)}</small></span>
+                        <span class="count">${notes.get(r.index).kind === 'same' ? 'повтор' : `в ${esc(by?.destination || '')}`}</span></label>`;
+                }).join('')}</div>` : ''}
+                <div class="preview" id="ip-dups-preview"></div>
+            </form>`,
+        foot: `<button class="btn ghost" data-close>Отмена</button>
+               <button class="btn danger" type="submit" form="ip-dups-form">Удалить</button>`,
+        onMount: ({ el, close }) => {
+            const f = $('form', el);
+            const submit = $('.modal-foot .danger', el);
+            const chosen = () => {
+                const drop = new Set();
+                conflicts.forEach((set, i) => {
+                    const keep = f.querySelector(`input[name="c${i}"]:checked`)?.value;
+                    if (keep) set.routes.forEach((r) => { if (r.index !== keep) drop.add(r.index); });
+                });
+                // Лишние пересчитываем без удаляемых: если исчезает широкая подсеть, узкий маршрут уже не лишний.
+                const left = routes.filter((r) => !drop.has(r.index));
+                const after = ipDuplicates(left);
+                $$('input[name="x"]:checked', f).forEach((c) => { if (after.get(c.value)?.removable) drop.add(c.value); });
+                return [...drop];
+            };
+            const update = () => {
+                const n = chosen().length;
+                submit.disabled = !n;
+                submit.textContent = n ? `Удалить ${n} ${plural(n, 'маршрут', 'маршрута', 'маршрутов')}` : 'Удалить';
+                $('#ip-dups-preview', el).innerHTML = n ? `После удаления останется ${routes.length - n} ${plural(routes.length - n, 'маршрут', 'маршрута', 'маршрутов')}` : 'Ничего не выбрано';
+            };
+            f.addEventListener('change', update);
+            update();
+            f.onsubmit = async (e) => {
+                e.preventDefault();
+                const ids = chosen();
+                if (!ids.length) return;
+                await withButton(submit, async () => {
+                    try {
+                        await api('/api/router/ip-routes/delete', 'POST', { indices: ids });
+                        toast(`Удалено повторов: ${ids.length}`, 'success');
+                        ids.forEach((i) => state.ipSelected.delete(i));
+                        close();
+                    } catch (err) {
+                        toast(err.message, 'error');
+                    }
+                });
+                invalidateIpRoutes();
+                await loadIpRoutes();
+            };
+        },
+    });
+}
+
+/** Лишние маршруты группы удаляются без вопросов о выборе: трафик пойдёт так же. */
+async function cleanIpGroup(comment) {
+    const notes = ipDuplicates();
+    const ids = ipGroupRoutes(comment).filter((r) => notes.get(r.index)?.removable).map((r) => r.index);
+    if (!ids.length) return;
+    if (!await confirmDialog(`Удалить из группы «${esc(comment || 'Без описания')}» ${ids.length} ${plural(ids.length, 'лишний маршрут', 'лишних маршрута', 'лишних маршрутов')}? Такие же адреса или подсети с тем же подключением уже есть — работа сайтов не изменится.`, { ok: 'Удалить', danger: false })) return;
+    await task('Удаление лишних маршрутов…', () => api('/api/router/ip-routes/delete', 'POST', { indices: ids })).catch(() => {});
+    ids.forEach((i) => state.ipSelected.delete(i));
+    invalidateIpRoutes();
+    await loadIpRoutes();
 }
 
 // ============================================================ Сайты → bat
@@ -2355,21 +2592,50 @@ function domainCoveredBy(name) {
     return state.groups.find((g) => g.entries.some((e) => !isIp(e) && covers(e, name)));
 }
 
+// Разобранные подсети маршрутов и IP-записей списков: результаты анализа перерисовываются
+// каждую секунду, и разбирать тысячи адресов заново для каждой строки накладно.
+let ipNetCache = { routes: null, list: [] };
+let listNetCache = { groups: null, entries: [], list: [] };
+
+function routeNets() {
+    const routes = state.ipRoutes || [];
+    if (ipNetCache.routes !== routes) {
+        ipNetCache = { routes, list: routes.map((r) => ({ r, net: cidrRange(r.destination) })).filter((x) => x.net && x.net.bits) };
+    }
+    return ipNetCache.list;
+}
+
+function listNets() {
+    const groups = state.groups;
+    if (listNetCache.groups !== groups || listNetCache.entries.length !== groups.length
+        || groups.some((g, i) => listNetCache.entries[i] !== g.entries)) {
+        listNetCache = { groups, entries: groups.map((g) => g.entries),
+            list: groups.flatMap((g) => g.entries.filter(isIp).map((entry) => ({ group: g, entry, net: cidrRange(entry) }))).filter((x) => x.net && x.net.bits) };
+    }
+    return listNetCache.list;
+}
+
+/** Всё, что на роутере уже направляет IPv4: IP-маршруты (от узкого к широкому) и IP-записи DNS-списков. */
+function ipOnRouter(ip) {
+    if (!isIpv4(ip)) return { routes: [], entries: [] };
+    const n = ipInt(ip);
+    const inside = (x) => n >= x.net.start && n <= x.net.end;
+    const routes = routeNets().filter(inside).sort((a, b) => b.net.bits - a.net.bits).map((x) => x.r);
+    const entries = listNets().filter(inside).map(({ group, entry }) => ({ group, entry }));
+    return { routes, entries };
+}
+
 /** Через какой маршрут уже идёт IPv4: «IP-маршрут Telegram» или DNS-список с этим адресом/подсетью. */
 function ipCoveredBy(ip) {
-    if (!isIpv4(ip)) return null;
-    const n = ipInt(ip);
-    const inNet = (cidr) => {
-        const [addr, bits = '32'] = cidr.split('/');
-        if (!isIpv4(addr) || +bits === 0) return false;
-        const size = 2 ** (32 - +bits);
-        return Math.floor(n / size) === Math.floor(ipInt(addr) / size);
-    };
-    const route = (state.ipRoutes || []).filter((r) => inNet(r.destination))
-        .sort((a, b) => +(b.destination.split('/')[1] || 32) - +(a.destination.split('/')[1] || 32))[0];
-    if (route) return `IP-маршрут «${route.comment || route.destination}» · ${route.interface_title || route.interface || 'без интерфейса'}`;
-    const group = state.groups.find((g) => g.entries.some((e) => isIp(e) && inNet(e)));
-    return group ? `список «${group.title}»` : null;
+    const { routes, entries } = ipOnRouter(ip);
+    const route = routes.find((r) => r.enabled) || routes[0];
+    if (route) return `IP-маршрут «${route.comment || route.destination}» · ${routeIfaceTitle(route)}${route.enabled ? '' : ' · выключен'}`;
+    return entries.length ? `список «${entries[0].group.title}»` : null;
+}
+
+/** Записи DNS-списков, которые направляют домен: сам домен, родительский домен или его поддомены. */
+function domainOnRouter(base) {
+    return state.groups.flatMap((g) => g.entries.filter((e) => !isIp(e) && (covers(e, base) || covers(base, e))).map((entry) => ({ group: g, entry })));
 }
 
 function capElapsed(sec) {
@@ -2661,8 +2927,12 @@ function renderCapResults(scope) {
         }).join('')}</div>`;
 
     const appTags = (apps) => data.all ? [...apps].map((a) => `<span class="tag cap-app-tag" title="Программа">${esc(a)}</span>`).join('') : '';
+    const menuBtn = (kind, value, label) => state.connected
+        ? `<button type="button" class="icon-btn sm plain cap-row-menu" data-action="cap-row-menu" data-kind="${kind}" data-value="${esc(value)}" ${attr} title="Уже на роутере: выключить или удалить" aria-label="${esc(label)}: выключить или удалить на роутере">${ICONS.more}</button>` : '';
     const domRows = groups.map((g) => {
         const covered = domainCoveredBy(g.base);
+        const onRouter = state.connected ? domainOnRouter(g.base) : [];
+        const off = covered && covered.routes.length > 0 && !covered.routes.some((r) => r.enabled);
         const subs = g.names.filter((n) => n !== g.base);
         return `
         <label class="cap-row${view.selDomains.has(g.base) ? ' selected' : ''}" data-cap-key="domain:${esc(g.base)}">
@@ -2670,16 +2940,20 @@ function renderCapResults(scope) {
             <div class="cap-main">
                 <div class="cap-line"><b class="mono">${esc(g.base)}</b>
                     ${g.queried ? '<span class="tag accent" title="Программа сама запрашивала этот домен">запрос программы</span>' : '<span class="tag" title="Домен найден по IP-адресу, к которому подключалась программа. Такой адрес может принадлежать и другим сайтам на том же CDN">по IP</span>'}
-                    ${covered ? `<span class="tag ok" title="Уже маршрутизируется">в списке «${esc(covered.title)}»</span>` : ''}${appTags(g.apps)}</div>
+                    ${covered ? `<span class="tag ${off ? 'warn' : 'ok'}" title="${off ? 'Домен в списке, но правило списка выключено' : 'Уже маршрутизируется'}">в списке «${esc(covered.title)}»${off ? ' · выключен' : ''}</span>`
+                        : onRouter.length ? `<span class="tag" title="${esc(onRouter.map((x) => `${x.entry} — «${x.group.title}»`).join('\n'))}">поддомены в «${esc(onRouter[0].group.title)}»</span>` : ''}${appTags(g.apps)}</div>
                 ${subs.length ? `<div class="cap-sub mono" title="${esc(subs.join('\n'))}">${esc(subs.slice(0, 6).join(', '))}${subs.length > 6 ? ` и ещё ${subs.length - 6}` : ''}</div>` : ''}
             </div>
             <span class="cap-meta" title="${esc([...g.ips].map((ip) => `${ip}${coveredIp(ip) ? ` — ${coveredIp(ip)}` : ''}`).join('\n'))}">${g.ips.size} IP${[...g.ips].some((ip) => coveredIp(ip)) ? ' · есть на роутере' : ''}</span>
+            ${onRouter.length ? menuBtn('domain', g.base, g.base) : ''}
         </label>`;
     }).join('');
 
     const ipRows = ips.map((i) => {
         const v4 = isIpv4(i.ip);
         const covered = coveredIp(i.ip);
+        const on = covered ? ipOnRouter(i.ip) : { routes: [], entries: [] };
+        const off = on.routes.length > 0 && !on.entries.length && !on.routes.some((r) => r.enabled);
         const ports = i.ports.slice(0, 4).join(', ') + (i.ports.length > 4 ? '…' : '');
         return `
         <label class="cap-row${view.selIps.has(i.ip) ? ' selected' : ''}${v4 ? '' : ' v6'}" data-cap-key="ip:${esc(i.ip)}" ${v4 ? '' : 'title="IPv6: роутер принимает только IPv4-маршруты — для таких адресов используйте DNS-список"'}>
@@ -2687,17 +2961,23 @@ function renderCapResults(scope) {
             <div class="cap-main">
                 <div class="cap-line"><b class="mono">${esc(i.ip)}</b>
                     <span class="tag${i.protos.includes('udp') ? ' warn' : ''}">${i.protos.map((p) => p.toUpperCase()).join('+')}${ports ? ` :${ports}` : ''}</span>
-                    ${covered ? `<span class="tag ok">${esc(covered)}</span>` : ''}${appTags(i.apps || [])}</div>
+                    ${covered ? `<span class="tag ${off ? 'warn' : 'ok'}">${esc(covered)}</span>` : ''}${appTags(i.apps || [])}</div>
                 <div class="cap-sub">${i.domains.length ? `<span class="mono">${esc(i.domains.slice(0, 3).join(', '))}${i.domains.length > 3 ? '…' : ''}</span>` : '<span class="warn-text">без домена</span>'}
                     <span class="muted"> · ${esc(i.procs.join(', '))}</span></div>
             </div>
             <span class="cap-meta" title="Активность: соединения и пакеты">${i.count.toLocaleString('ru-RU')}</span>
+            ${covered ? menuBtn('ip', i.ip, i.ip) : ''}
         </label>`;
     }).join('');
 
     const nd = groups.filter((g) => view.selDomains.has(g.base)).length;
     const ni = ips.filter((i) => isIpv4(i.ip) && view.selIps.has(i.ip)).length;
     const nIpv4 = ips.filter((i) => isIpv4(i.ip)).length;
+    // Выбранное, что уже есть на роутере: его можно выключить или убрать прямо отсюда.
+    const domOn = state.connected ? groups.filter((g) => view.selDomains.has(g.base) && domainOnRouter(g.base).length).length : 0;
+    const ipOn = state.connected ? ips.filter((i) => view.selIps.has(i.ip) && coveredIp(i.ip)).map((i) => ipOnRouter(i.ip)) : [];
+    const ipOnRoutes = ipOn.flatMap((o) => o.routes);
+    const routerActions = (items) => items.filter(Boolean).length ? `<span class="cap-router-actions">${items.filter(Boolean).join('')}</span>` : '';
     const empty = (text) => `<div class="empty">${text}</div>`;
     const waiting = cap.session?.running && !data.history;
     const filtered = view.query.trim() || view.newOnly;
@@ -2717,7 +2997,8 @@ function renderCapResults(scope) {
                 <header class="cap-card-head">
                     <span class="cap-card-icon">${ICONS.globe}</span><div><h2>Домены <span class="badge">${groups.length}${groups.length !== allGroups.length ? ` / ${allGroups.length}` : ''}</span></h2><small>Для DNS-списка · роутер сам обновляет IP</small></div>
                 </header>
-                <div class="cap-selection-bar">${masterBox('cap-dom-all', nd, groups.length, 'Выбрать все домены', attr)}<span>${nd ? `Выбрано: ${nd} из ${groups.length}` : 'Ничего не выбрано'}${hiddenSelection(view.selDomains.size, nd)}</span></div>
+                <div class="cap-selection-bar">${masterBox('cap-dom-all', nd, groups.length, 'Выбрать все домены', attr)}<span>${nd ? `Выбрано: ${nd} из ${groups.length}` : 'Ничего не выбрано'}${hiddenSelection(view.selDomains.size, nd)}</span>${routerActions([
+                    domOn && `<button class="link-btn danger-link" data-action="cap-dom-remove" ${attr} title="Удалить выбранные домены из DNS-списков роутера">Убрать с роутера (${domOn})</button>`])}</div>
                 <div class="cap-list" id="${prefix}-dom-list">${domRows || empty(filtered ? 'По этому фильтру домены не найдены' : waiting ? 'Пользуйтесь программой — домены появятся здесь' : 'Домены не найдены')}</div>
                 <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="domain-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-exact" data-cap-option="exact" ${attr} ${view.exact ? 'checked' : ''}><span></span></span>Добавлять отдельные поддомены</label><small>Обычно достаточно основного домена: он включает поддомены.</small></div><button class="btn primary" data-action="cap-dom-add" ${attr} ${nd ? '' : 'disabled'}>${ICONS.plus} В DNS-список${nd ? ` (${nd})` : ''}</button></footer>
             </section>
@@ -2725,7 +3006,10 @@ function renderCapResults(scope) {
                 <header class="cap-card-head">
                     <span class="cap-card-icon ip">${ICONS.router}</span><div><h2>IP-адреса <span class="badge">${ips.length}${ips.length !== data.ips.length ? ` / ${data.ips.length}` : ''}</span></h2><small>Для IP-маршрутов · полезно для адресов без домена</small></div>
                 </header>
-                <div class="cap-selection-bar">${masterBox('cap-ip-all', ni, nIpv4, 'Выбрать все IPv4-адреса', attr)}<span>${ni ? `Выбрано: ${ni} из ${nIpv4}` : 'Ничего не выбрано'}${hiddenSelection(view.selIps.size, ni)}</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-nodomain" data-cap-option="noDomainOnly" ${attr} ${view.noDomainOnly ? 'checked' : ''}><span></span></span>Без домена</label></div>
+                <div class="cap-selection-bar">${masterBox('cap-ip-all', ni, nIpv4, 'Выбрать все IPv4-адреса', attr)}<span>${ni ? `Выбрано: ${ni} из ${nIpv4}` : 'Ничего не выбрано'}${hiddenSelection(view.selIps.size, ni)}</span>${routerActions([
+                    ipOnRoutes.some((r) => r.enabled) && `<button class="link-btn" data-action="cap-ip-disable" ${attr} title="Выключить IP-маршруты выбранных адресов: они останутся на роутере, но трафик пойдёт напрямую">Выключить</button>`,
+                    ipOnRoutes.some((r) => !r.enabled) && `<button class="link-btn" data-action="cap-ip-enable" ${attr} title="Снова включить выключенные IP-маршруты выбранных адресов">Включить</button>`,
+                    ipOn.length && `<button class="link-btn danger-link" data-action="cap-ip-remove" ${attr} title="Удалить с роутера маршруты и записи, через которые идут выбранные адреса">Убрать с роутера (${ipOn.length})</button>`])}<label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-nodomain" data-cap-option="noDomainOnly" ${attr} ${view.noDomainOnly ? 'checked' : ''}><span></span></span>Без домена</label></div>
                 <div class="cap-list" id="${prefix}-ip-list">${ipRows || empty(filtered ? 'По этому фильтру IP не найдены' : waiting ? 'Пользуйтесь программой — IP появятся здесь' : view.noDomainOnly ? 'Адресов без домена не найдено' : 'Адреса не найдены')}</div>
                 <footer class="cap-card-foot"><div class="cap-add-options" data-cap-key="ip-options"><span class="cap-add-title">Параметры добавления</span><label class="switch-label"><span class="switch"><input type="checkbox" id="${prefix}-agg" data-cap-option="agg24" ${attr} ${view.agg24 ? 'checked' : ''}><span></span></span>Объединять IP в подсети /24</label><small>Через туннель пойдут и соседние адреса серверов. Отключите, чтобы добавить только точные IP.</small></div><button class="btn primary" data-action="cap-ip-add" ${attr} ${ni ? '' : 'disabled'}>${ICONS.plus} В IP-маршруты${ni ? ` (${ni})` : ''}</button></footer>
             </section>
@@ -2945,6 +3229,141 @@ function capAddIps(scope = 'live') {
     if (list.length) openIpCreate(list.join('\n'), null, data.name);
 }
 
+// ============================================================ анализ программ: адреса, уже добавленные на роутер
+
+/** Убранное с роутера автодобавление не возвращает обратно, пока идёт этот анализ. */
+function capRemember(values) {
+    const names = capProgramNames();
+    for (const v of values) {
+        const extra = isIpv4(v) ? [v.split('.').slice(0, 3).join('.') + '.0/24'] : [];
+        for (const name of names) [v, ...extra].forEach((x) => cap.autoDone.add(`${name}\n${x}`));
+    }
+}
+
+/** Выбранные строки результатов, которые уже есть на роутере. */
+function capSelectedOnRouter(scope) {
+    const data = capData(scope);
+    if (!data || !state.connected) return { domains: [], ips: [], entries: [], routes: [] };
+    const view = capResultView(scope);
+    const { groups, ips } = capShownResults(data, scope);
+    const domains = groups.filter((g) => view.selDomains.has(g.base) && domainOnRouter(g.base).length);
+    const found = ips.filter((i) => view.selIps.has(i.ip)).map((i) => ({ i, on: ipOnRouter(i.ip) }))
+        .filter(({ on }) => on.routes.length || on.entries.length);
+    const routes = [...new Map(found.flatMap(({ on }) => on.routes).map((r) => [r.index, r])).values()];
+    const entries = [...new Map(found.flatMap(({ on }) => on.entries).map((x) => [`${x.group.name}\n${x.entry}`, x])).values()];
+    return { domains, ips: found.map(({ i }) => i), entries, routes };
+}
+
+/** Удаляет с роутера IP-маршруты и записи DNS-списков после подтверждения со списком того, что исчезнет. */
+async function capRemoveFromRouter({ routes = [], entries = [] }, remember = []) {
+    const lines = [
+        ...routes.map((r) => `<b class="mono">${esc(r.destination)}</b> — IP-маршрут ${esc(routeGroupTitle(r))} · ${esc(routeIfaceTitle(r))}`),
+        ...entries.map(({ group, entry }) => `<b class="mono">${esc(entry)}</b> — DNS-список «${esc(group.title)}»`),
+    ];
+    if (!lines.length) return;
+    const wide = routes.filter((r) => cidrRange(r.destination).bits < 32).length;
+    if (!await confirmDialog(`Удалить с роутера ${lines.length} ${plural(lines.length, 'запись', 'записи', 'записей')}?
+        <span class="confirm-list">${lines.slice(0, 12).map((l) => `<span>${l}</span>`).join('')}${lines.length > 12 ? `<span class="muted">и ещё ${lines.length - 12}</span>` : ''}</span>
+        ${wide ? '<span class="muted">Подсеть убирается целиком — вместе с соседними адресами.</span>' : ''}`, { title: 'Убрать с роутера' })) return;
+    capRemember(remember);
+    const errors = [];
+    if (routes.length) {
+        try { await api('/api/router/ip-routes/delete', 'POST', { indices: routes.map((r) => r.index) }); }
+        catch (e) { errors.push(e.message); }
+    }
+    const byGroup = new Map();
+    entries.forEach(({ group, entry }) => byGroup.set(group.name, [...(byGroup.get(group.name) || []), entry]));
+    for (const [name, list] of byGroup) {
+        try { applyGroup((await api(`/api/router/groups/${encodeURIComponent(name)}/entries`, 'DELETE', { entries: list })).group); }
+        catch (e) { errors.push(e.message); }
+    }
+    if (routes.length) { invalidateIpRoutes(); await ensureIpRoutes(); }
+    if (entries.length) renderGroups();
+    if (errors.length) toast(errors.join('; '), 'error');
+    else toast(`Убрано с роутера: ${lines.length} ${plural(lines.length, 'запись', 'записи', 'записей')}`, 'success');
+    renderCapResults();
+}
+
+/** Включает или выключает IP-маршруты: адреса остаются на роутере, но трафик идёт напрямую. */
+async function capSetRoutesEnabled(routes, enabled) {
+    const ids = [...new Set(routes.filter((r) => r.enabled !== enabled).map((r) => r.index))];
+    if (!ids.length) return toast(enabled ? 'Маршруты уже включены' : 'Маршруты уже выключены', 'info', { timeout: 2500 });
+    try {
+        const res = await api('/api/router/ip-routes/toggle', 'POST', { indices: ids, enabled });
+        invalidateIpRoutes({ keepData: true });
+        (state.ipRoutes || []).forEach((r) => { if (ids.includes(r.index)) r.enabled = enabled; });
+        toast(res.message, 'success', { timeout: 2500 });
+    } catch (e) {
+        toast(e.message, 'error');
+    }
+    renderCapResults();
+}
+
+/** Отдельный домен в списке выключить нельзя: правило Keenetic действует на весь список. */
+async function capSetGroupEnabled(group, enabled) {
+    const ids = group.routes.filter((r) => r.enabled !== enabled).map((r) => r.index);
+    if (!ids.length) return;
+    try {
+        const res = await api('/api/router/dns-routes/toggle', 'POST', { indices: ids, enabled });
+        group.routes.forEach((r) => { if (ids.includes(r.index)) r.enabled = enabled; });
+        renderGroups();
+        toast(res.message, 'success', { timeout: 2500 });
+    } catch (e) {
+        toast(e.message, 'error');
+        await loadOverview({ quiet: true });
+    }
+    renderCapResults();
+}
+
+/** Меню строки результата, которая уже есть на роутере: выключить или удалить то, что её направляет. */
+function capRowMenuItems(kind, value) {
+    if (kind === 'domain') {
+        const found = domainOnRouter(value);
+        const names = capDomainGroups({ domains: [...(capData('live')?.domains || []), ...(capData('history')?.domains || [])] })
+            .find((g) => g.base === value)?.names || [];
+        const remember = [value, ...names];
+        const groups = [...new Map(found.map((x) => [x.group.name, x.group])).values()].filter((g) => g.routes.length);
+        return [
+            ...found.map((x) => ({ label: `Удалить ${x.entry} из списка`, note: `«${x.group.title}»`, danger: true,
+                run: () => capRemoveFromRouter({ entries: [x] }, [...remember, x.entry]) })),
+            ...(found.length > 1 ? [{ label: `Удалить все записи (${found.length})`, danger: true, run: () => capRemoveFromRouter({ entries: found }, [...remember, ...found.map((x) => x.entry)]) }] : []),
+            ...(groups.length ? ['-'] : []),
+            ...groups.map((g) => {
+                const on = g.routes.some((r) => r.enabled);
+                return { label: `${on ? 'Выключить' : 'Включить'} весь список «${g.title}»`,
+                    note: on ? 'Правило действует на весь список: отдельный домен выключить нельзя' : `${g.count} ${plural(g.count, 'запись', 'записи', 'записей')} снова пойдут через ${g.routes.map((r) => r.interface_title).join(', ')}`,
+                    run: () => capSetGroupEnabled(g, !on) };
+            }),
+        ];
+    }
+    const { routes, entries } = ipOnRouter(value);
+    const items = [];
+    for (const r of routes) {
+        if (items.length) items.push('-');
+        const note = `${routeGroupTitle(r)} · ${routeIfaceTitle(r)}`;
+        items.push(r.enabled
+            ? { label: `Выключить маршрут ${r.destination}`, note, run: () => capSetRoutesEnabled([r], false) }
+            : { label: `Включить маршрут ${r.destination}`, note, run: () => capSetRoutesEnabled([r], true) });
+        items.push({ label: `Удалить маршрут ${r.destination}`, note, danger: true, run: () => capRemoveFromRouter({ routes: [r] }, [value]) });
+    }
+    if (entries.length && items.length) items.push('-');
+    entries.forEach((x) => items.push({ label: `Удалить ${x.entry} из списка`, note: `«${x.group.title}»`, danger: true,
+        run: () => capRemoveFromRouter({ entries: [x] }, [value]) }));
+    return items;
+}
+
+let capMenu = { owner: null, closed: 0 };
+
+function openCapRowMenu(el) {
+    // Повторное нажатие на ту же кнопку закрывает меню, а не открывает его снова.
+    if (capMenu.owner === el && Date.now() - capMenu.closed < 400) return;
+    const items = capRowMenuItems(el.dataset.kind, el.dataset.value);
+    if (!items.length) return;
+    const r = el.getBoundingClientRect();
+    capMenu.owner = null;
+    showMenu(r.left, r.bottom + 4, items, () => { capMenu = { owner: el, closed: Date.now() }; });
+}
+
 // ============================================================ буфер обмена и контекстное меню
 // В окне программы (WebView2) стандартное меню отключено - рисуем своё.
 
@@ -3102,10 +3521,15 @@ document.addEventListener('contextmenu', (e) => {
     const field = isTextField(e.target) ? e.target : null;
     const chip = !field && e.target.closest('.chip');
     const row = !field && e.target.closest('[data-ip]');
+    const capRow = !field && e.target.closest('.cap-row');
     const selection = String(window.getSelection() || '');
     let items = [];
     if (field) items = fieldMenu(field);
-    else if (chip) items = chipMenu(chip);
+    else if (chip && $('[data-action="entry-remove"]', chip)) items = chipMenu(chip);
+    else if (capRow && $('[data-action="cap-row-menu"]', capRow)) {
+        const btn = $('[data-action="cap-row-menu"]', capRow);
+        items = capRowMenuItems(btn.dataset.kind, btn.dataset.value);
+    }
     else if (row) items = ipRowMenu(row);
     else if (selection.trim()) items = [{ label: 'Копировать', hint: 'Ctrl+C', run: () => writeClipboard(selection) }];
     e.preventDefault();
@@ -3320,6 +3744,8 @@ const actions = {
     'ipg-export': (el) => exportFile({ groups: [], ip: (r) => ckey(r.comment) === ckey(el.dataset.comment), name: el.dataset.comment || 'ip' })
         .catch((e) => toast(e.message, 'error')),
     'ipg-delete': (el) => deleteIpRoutes(ipGroupRoutes(el.dataset.comment).map((r) => r.index)),
+    'ipg-clean': (el) => cleanIpGroup(el.dataset.comment),
+    'ip-dups': () => openIpDuplicates(),
     async 'route-delete'(el) {
         if (!await confirmDialog('Удалить правило маршрутизации? Сам список доменов останется.')) return;
         await task('Удаление правила…', () => api('/api/router/dns-routes/delete', 'POST', { index: el.dataset.index }));
@@ -3494,6 +3920,19 @@ const actions = {
         renderCapResults(scope);
     },
     'cap-dom-add': (el) => capAddDomains(capScope(el)),
+    'cap-row-menu': (el) => openCapRowMenu(el),
+    'cap-dom-remove'(el) {
+        const { domains } = capSelectedOnRouter(capScope(el));
+        const entries = [...new Map(domains.flatMap((g) => domainOnRouter(g.base)).map((x) => [`${x.group.name}
+${x.entry}`, x])).values()];
+        return capRemoveFromRouter({ entries }, [...domains.flatMap((g) => [g.base, ...g.names]), ...entries.map((x) => x.entry)]);
+    },
+    'cap-ip-remove'(el) {
+        const { ips, routes, entries } = capSelectedOnRouter(capScope(el));
+        return capRemoveFromRouter({ routes, entries }, ips.map((i) => i.ip));
+    },
+    'cap-ip-disable': (el) => capSetRoutesEnabled(capSelectedOnRouter(capScope(el)).routes, false),
+    'cap-ip-enable': (el) => capSetRoutesEnabled(capSelectedOnRouter(capScope(el)).routes, true),
     'cap-ip-add': (el) => capAddIps(capScope(el)),
     'cap-search-clear'(el) {
         const scope = capScope(el);

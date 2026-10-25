@@ -3,14 +3,25 @@ window.testRequests = [];
 window.testSession = null;
 const testHistory = [{name: 'Discord', sessions: 2, domains: 2, ips: 3, full: true, last: '2026-10-03T12:00:00'},
                      {name: 'Code', sessions: 1, domains: 1, ips: 1, full: false, last: '2026-10-03T12:00:00'}];
-const testRoute = {destination: '8.8.8.0/24', comment: 'Discord', interface: 'Wireguard0', interface_title: 'VPN'};
+const testRoute = {index: 'r1', destination: '8.8.8.0/24', comment: 'Discord', interface: 'Wireguard0', interface_title: 'VPN', enabled: true};
+window.testRoutes = [testRoute];
 window.fetch = async (url, opts = {}) => {
     const payload = opts.body ? JSON.parse(opts.body) : null;
     window.testRequests.push({url, payload});
     let body = {success: true};
     if (url === '/api/router/settings') body.settings = {has_password: false};
     else if (url === '/api/router/overview') Object.assign(body, {system: {model: 'Тестовый роутер', release: '5.0'}, interfaces: [], groups: [], limit: 300});
-    else if (url === '/api/router/ip-routes') body.routes = [testRoute];
+    else if (url === '/api/router/ip-routes') body.routes = structuredClone(window.testRoutes);
+    else if (url === '/api/router/ip-routes/delete') {
+        window.testRoutes = window.testRoutes.filter((r) => !payload.indices.includes(r.index));
+        body.message = 'Удалено';
+    }
+    else if (url === '/api/router/ip-routes/toggle' || url === '/api/router/dns-routes/toggle') body.message = 'Готово';
+    else if (/^\/api\/router\/groups\/[^/]+\/entries$/.test(url) && opts.method === 'DELETE') {
+        const g = state.groups.find((x) => x.name === decodeURIComponent(url.split('/')[4]));
+        const entries = g.entries.filter((e) => !payload.entries.includes(e));
+        body.group = {name: g.name, title: g.title, description: g.title, entries, count: entries.length};
+    }
     else if (url === '/api/sites') body.sites = [];
     else if (url === '/api/capture/history') body.programs = testHistory;
     else if (url.startsWith('/api/capture/program?')) {
@@ -273,6 +284,63 @@ window.addEventListener('load', async () => {
         testHistory.push(...savedHistory);
         cap.history = savedHistory;
         renderCapHistory();
+
+        // Адреса, которые уже есть на роутере: выключение и удаление прямо из результатов анализа.
+        const requests = (url) => window.testRequests.filter((r) => r.url === url).map((r) => r.payload);
+        const menuItem = (text) => $$('.ctx-item').find((b) => b.textContent.includes(text));
+        state.groups = [{name: 'g1', title: 'Discord', entries: ['discord.com', 'cdn.example.com', '1.1.1.0/24'], count: 3, limit: 300,
+            routes: [{index: 'd1', group: 'g1', interface: 'Wireguard0', interface_title: 'VPN', interface_up: true, enabled: true}]}];
+        window.testRoutes = [testRoute, {index: 'r2', destination: '8.8.8.8/32', comment: 'Discord', interface: 'Wireguard0', interface_title: 'VPN', enabled: true}];
+        invalidateIpRoutes();
+        await ensureIpRoutes();
+        Object.assign(cap, {query: '', newOnly: false, noDomainOnly: false, autoAdd: false});
+        cap.selDomains.clear(); cap.selIps.clear(); cap.autoDone.clear();
+        renderCapResults();
+        const row = (sel) => $(sel, $('#cap-results')).closest('.cap-row');
+        assert(!!$('[data-action="cap-row-menu"]', row('[data-cap-dom="discord.com"]')) && !!$('[data-action="cap-row-menu"]', row('[data-cap-ip="8.8.8.8"]'))
+               && !$('[data-action="cap-row-menu"]', row('[data-cap-dom="example.net"]')),
+               'У адресов, которые уже есть на роутере, есть меню управления');
+        assert(row('[data-cap-dom="example.com"]').textContent.includes('поддомены в «Discord»') && !!$('[data-action="cap-row-menu"]', row('[data-cap-dom="example.com"]')),
+               'Домен, поддомены которого есть в списке, тоже можно убрать');
+        $('[data-action="cap-row-menu"]', row('[data-cap-ip="8.8.8.8"]')).click();
+        assert(!!menuItem('Выключить маршрут 8.8.8.8/32') && !!menuItem('Удалить маршрут 8.8.8.0/24'), 'Меню IP предлагает выключить или удалить каждый маршрут, через который он идёт');
+        menuItem('Выключить маршрут 8.8.8.8/32').click();
+        await tick();
+        assert(JSON.stringify(requests('/api/router/ip-routes/toggle').pop()) === JSON.stringify({indices: ['r2'], enabled: false})
+               && state.ipRoutes.find((r) => r.index === 'r2').enabled === false, 'Маршрут выключается из анализа программы');
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        $('[data-action="cap-row-menu"]', row('[data-cap-dom="discord.com"]')).click();
+        assert(!!menuItem('Удалить discord.com из списка') && !!menuItem('Выключить весь список «Discord»'), 'Меню домена предлагает удалить запись или выключить список');
+        menuItem('Выключить весь список «Discord»').click();
+        await tick();
+        assert(JSON.stringify(requests('/api/router/dns-routes/toggle').pop()) === JSON.stringify({indices: ['d1'], enabled: false})
+               && row('[data-cap-dom="discord.com"]').textContent.includes('выключен'), 'Список выключается, домен отмечен выключенным');
+        row('[data-cap-dom="discord.com"]').dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, clientX: 20, clientY: 20}));
+        assert(!!menuItem('Включить весь список «Discord»'), 'Правый клик по строке открывает то же меню');
+        closeMenu();
+
+        for (const ipAddress of ['8.8.8.8', '1.1.1.1']) $(`[data-cap-ip="${ipAddress}"]`, $('#cap-results')).click();
+        const ipBar = $('[data-action="cap-ip-remove"]', $('#cap-results'))?.closest('.cap-selection-bar');
+        assert(ipBar && ipBar.textContent.includes('Убрать с роутера (2)') && !!$('[data-action="cap-ip-disable"]', ipBar) && !!$('[data-action="cap-ip-enable"]', ipBar),
+               'Для выбранных IP доступны выключение, включение и удаление с роутера');
+        let confirmText = '';
+        confirmDialog = async (text) => { confirmText = text; return true; };
+        await actions['cap-ip-remove']($('[data-action="cap-ip-remove"]', $('#cap-results')));
+        const deletedEntries = window.testRequests.filter((r) => r.url === '/api/router/groups/g1/entries').pop().payload;
+        assert(JSON.stringify(requests('/api/router/ip-routes/delete').pop()) === JSON.stringify({indices: ['r2', 'r1']})
+               && JSON.stringify(deletedEntries) === JSON.stringify({entries: ['1.1.1.0/24']}) && confirmText.includes('Подсеть убирается целиком'),
+               'Удаление IP убирает все маршруты и записи списков, через которые он шёл, после подтверждения');
+        assert(!state.ipRoutes.length && !findGroup('g1').entries.includes('1.1.1.0/24') && !$('[data-action="cap-row-menu"]', row('[data-cap-ip="8.8.8.8"]'))
+               && cap.autoDone.has('Discord\n8.8.8.8') && cap.autoDone.has('Discord\n8.8.8.0/24'),
+               'После удаления IP больше не отмечен и не вернётся автодобавлением');
+        cap.selIps.clear();
+        for (const name of ['discord.com', 'example.com']) $(`[data-cap-dom="${name}"]`, $('#cap-results')).click();
+        await actions['cap-dom-remove']($('[data-action="cap-dom-remove"]', $('#cap-results')));
+        assert(JSON.stringify(window.testRequests.filter((r) => r.url === '/api/router/groups/g1/entries').pop().payload) === JSON.stringify({entries: ['discord.com', 'cdn.example.com']})
+               && !findGroup('g1').entries.length && cap.autoDone.has('Discord\ndiscord.com'),
+               'Выбранные домены удаляются из DNS-списков вместе с их поддоменами');
+        cap.selDomains.clear();
+        renderCapResults();
         document.body.dataset.testStatus = 'passed';
         document.body.dataset.testCount = report.length;
     } catch (error) {

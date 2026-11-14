@@ -233,6 +233,7 @@ def backup_router_change(client: KeeneticClient, operation: str) -> str:
     filename = f'before-{operation}-{datetime.now():%Y%m%d-%H%M%S-%f}.json'
     backup = os.path.join(folder, filename)
     data = transfer.export_config(client, app_name=APP_NAME)
+    data['configuration_source'] = 'running'
     data['operation'] = operation
     data['router_id'] = router_id()
     # Дополнительно сохраняем шлюзы, метрики, маршрут по умолчанию и index.
@@ -833,22 +834,27 @@ def router_move():
     client = router()
     groups = set(data.get('groups') or [])
     source = data.get('from') or ''
+    single_dns = data.get('single_dns_interface') is True
     with client._lock:
-        dns_indices = [r.index for r in client.dns_routes()
-                       if r.group in groups and (not source or r.interface == source)]
+        all_dns = client.dns_routes()
+        dns_indices = [r.index for r in all_dns
+                       if r.group in groups and (single_dns or not source or r.interface == source)]
+        changed_dns_groups = len({r.group for r in all_dns if r.index in dns_indices and r.interface != interface})
         ip_indices = [str(i) for i in data.get('ip_indices') or []]
         expected_dns = data.get('expected_dns_routes')
         expected_ip = data.get('expected_ip_routes')
         # Проверяем обе части до первой записи: устаревший IP-выбор не должен
         # приводить даже к частичному переносу DNS-списков.
-        client.validate_dns_move(dns_indices, interface, expected_dns)
+        client.validate_dns_move(dns_indices, interface, expected_dns, single_dns)
         client.validate_ip_move(ip_indices, interface, expected_ip)
         backup = backup_router_change(client, 'tunnel-move')
-        moved_dns = client.move_dns_routes(dns_indices, interface, expected_dns) if dns_indices else 0
+        moved_dns = client.move_dns_routes(dns_indices, interface, expected_dns, single_dns) if dns_indices else 0
         moved_ip = client.move_ip_routes(ip_indices, interface, expected_ip) if ip_indices else 0
     remember_interface(interface)
-    return jsonify({'success': True, 'dns': moved_dns, 'ip': moved_ip, 'backup': backup,
-                    'message': f'Переведено: правил {moved_dns}, IP-маршрутов {moved_ip}'})
+    message = (f'Настроено DNS-списков: {changed_dns_groups}; IP-маршрутов: {moved_ip}' if single_dns else
+               f'Переведено: правил {moved_dns}, IP-маршрутов {moved_ip}')
+    return jsonify({'success': True, 'dns': moved_dns, 'dns_groups': changed_dns_groups,
+                    'ip': moved_ip, 'backup': backup, 'message': message})
 
 
 @app.route('/api/router/ip-routes/delete', methods=['POST'])

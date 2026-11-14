@@ -7,7 +7,7 @@ const ipFixture = {
              {index: '3', destination: '9.9.9.9/32', comment: '', interface: 'Wireguard0', interface_title: 'Основной VPN', enabled: true},
              {index: '4', destination: '149.154.160.0/20', comment: 'Смешанная группа', interface: 'Wireguard0', interface_title: 'Основной VPN', enabled: true},
              {index: '5', destination: '91.108.56.0/22', comment: 'Смешанная группа', interface: 'Wireguard1', interface_title: 'Рабочий VPN', enabled: true}],
-    moveFail: false, requests: [], pending: [], delay: false, fail: false, overviewDelay: false, overviewResolve: null, overviewFail: false,
+    groups: null, moveFail: false, requests: [], pending: [], delay: false, fail: false, overviewDelay: false, overviewResolve: null, overviewFail: false,
 };
 window.fetch = async (url, options = {}) => {
     const payload = options.body ? JSON.parse(options.body) : null;
@@ -19,7 +19,7 @@ window.fetch = async (url, options = {}) => {
         if (ipFixture.overviewDelay) await new Promise((resolve) => { ipFixture.overviewResolve = resolve; });
         if (ipFixture.overviewFail) return {ok: false, json: async () => ({success: false, error: 'Ошибка подключения к роутеру'})};
         Object.assign(body, {system: {model: 'Тестовый роутер', release: '5.0'}, interfaces: ipFixture.interfaces,
-            groups: [], limit: 300, default_interface: 'Wireguard0'});
+            groups: ipFixture.groups || [], limit: 300, default_interface: 'Wireguard0'});
     } else if (url === '/api/router/ip-routes' && options.method !== 'POST') {
         const routes = structuredClone(ipFixture.routes), fail = ipFixture.fail;
         if (ipFixture.delay) await new Promise((resolve) => ipFixture.pending.push(resolve));
@@ -36,6 +36,15 @@ window.fetch = async (url, options = {}) => {
             r.interface = payload.interface;
             r.interface_title = ipFixture.interfaces.find((i) => i.id === payload.interface)?.description;
         }});
+        if (payload.single_dns_interface && payload.groups?.length) {
+            const groups = structuredClone(ipFixture.groups || state.groups);
+            for (const g of groups.filter((g) => payload.groups.includes(g.name))) {
+                const target = g.routes.find((r) => r.interface === payload.interface)
+                    || {...g.routes[0], index: 'dns-target', interface: payload.interface};
+                g.routes = [target];
+            }
+            ipFixture.groups = groups;
+        }
         body.message = 'Перенос проверен'; body.moved = ids.length;
     } else if (url === '/api/router/ip-routes/comment') {
         ipFixture.routes.forEach((r) => { if (payload.indices.includes(r.index)) r.comment = payload.comment; });
@@ -240,6 +249,25 @@ window.addEventListener('load', async () => {
                && unifiedCall.expected_ip_routes.every((r) => r.interface === 'Wireguard1')
                && unifiedCall.expected_dns_routes.length === 0, 'Общий перенос выбранных групп соблюдает фильтр исходного туннеля');
         ipFixture.routes = structuredClone(beforeMoves); await loadIpRoutes();
+
+        const dnsRule = (index, iface) => ({index, group: 'single', interface: iface,
+            interface_title: iface, auto: true, reject: true, enabled: true});
+        ipFixture.groups = [{name: 'single', title: 'Один туннель', entries: ['example.org'], count: 1,
+            routes: [dnsRule('old-one', 'Wireguard1'), dnsRule('old-two', 'LegacyVPN'), dnsRule('target', 'Wireguard0')]}];
+        state.groups = structuredClone(ipFixture.groups);
+        await openMove({groups: ['single'], from: 'Wireguard1'});
+        moveForm = $('#move-form'); moveForm.to.value = 'Wireguard0';
+        assert($('#modal-root').textContent.includes('останется только новое подключение'),
+               'Форма объясняет, что у выбранного DNS-списка останется только новый туннель');
+        moveForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#move-form'); n++) await tick();
+        await tick();
+        const singleCall = ipFixture.requests.filter((r) => r.url === '/api/router/move').at(-1).payload;
+        assert(singleCall.single_dns_interface === true && singleCall.expected_dns_routes.length === 3,
+               'Смена туннеля отправляет снимок всех привязок DNS-списка, включая третий интерфейс и существующий целевой');
+        assert(state.groups[0].routes.length === 1 && state.groups[0].routes[0].interface === 'Wireguard0',
+               'После смены туннеля у DNS-списка отображается одно правило с выбранным подключением');
+        ipFixture.groups = null; state.groups = [];
 
         ipFixture.moveFail = true; openIpMove(['1']); moveForm = $('#ipmove-form');
         state.ipRoutes.find((r) => r.index === '1').comment = 'Локальное изменение';

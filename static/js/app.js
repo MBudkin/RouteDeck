@@ -1342,6 +1342,7 @@ async function openMove(preset = {}) {
                     </div>
                 </div>
                 <div class="summary" id="mv-summary"></div>
+                <small class="muted">У выбранных DNS-списков останется только новое подключение. Прежние привязки будут заменены.</small>
             </form>`,
         foot: `<button class="btn ghost" data-close>Отмена</button>
                <button class="btn primary" type="submit" form="move-form">Перевести</button>`,
@@ -1350,12 +1351,12 @@ async function openMove(preset = {}) {
             const selection = () => {
                 const src = f.from.value;
                 const groups = $$('input[name=g]:checked', f).map((c) => c.value);
-                const dnsCount = routes.filter((r) => groups.includes(r.group) && (!src || r.interface === src) && r.interface !== f.to.value).length;
+                const dnsCount = routes.filter((r) => groups.includes(r.group) && r.interface !== f.to.value).length;
                 const ipRoutes = $$('input[name=ip]:checked', f)
                     .flatMap((c) => ipg[+c.value].routes)
                     .filter((r) => (!src || r.interface === src) && r.interface !== f.to.value);
                 const ipIdx = ipRoutes.map((r) => r.index);
-                const dnsRoutes = routes.filter((r) => groups.includes(r.group) && (!src || r.interface === src));
+                const dnsRoutes = routes.filter((r) => groups.includes(r.group));
                 return { src, groups, dnsCount, ipIdx, ipRoutes, dnsRoutes };
             };
             const summary = () => {
@@ -1390,7 +1391,7 @@ async function openMove(preset = {}) {
                     try {
                         const res = await api('/api/router/move', 'POST', {
                             groups: s.groups, from: s.src, ip_indices: s.ipIdx, interface: f.to.value,
-                            expected_ip_routes: s.ipRoutes, expected_dns_routes: s.dnsRoutes,
+                            expected_ip_routes: s.ipRoutes, expected_dns_routes: s.dnsRoutes, single_dns_interface: true,
                         });
                         toast(`${res.message} → ${ifaceTitle(f.to.value)}`, 'success');
                         close();

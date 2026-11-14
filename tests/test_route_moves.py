@@ -464,6 +464,52 @@ class VisibilityTests(VirtualTimeTests):
         self.assertEqual([r.interface for r in router.ip], ['new'])
 
 
+class SingleDnsInterfaceTests(VirtualTimeTests):
+    def test_group_replacement_removes_all_previous_interfaces(self):
+        dns = [DnsRoute('a', 'group', 'old', True, True),
+               DnsRoute('b', 'group', 'other', True, True),
+               DnsRoute('keep', 'group', 'new', True, True),
+               DnsRoute('untouched', 'another', 'old')]
+        router = Router(dns=dns)
+        router.move_dns_routes(['a', 'b', 'keep'], 'new', [r.to_dict() for r in dns[:3]], True)
+        self.assertEqual([(r.index, r.interface) for r in router.dns if r.group == 'group'], [('keep', 'new')])
+        self.assertEqual(router.dns[-1].index, 'untouched')
+        self.assertEqual(len(router.writes), 1)
+
+    def test_partial_group_selection_is_rejected_before_writing(self):
+        router = Router(dns=[DnsRoute('a', 'group', 'old'), DnsRoute('b', 'group', 'other')])
+        with self.assertRaisesRegex(KeeneticError, 'все его правила'):
+            router.move_dns_routes(['a'], 'new', single_interface=True)
+        self.assertEqual(router.writes, [])
+
+    def test_unexpected_binding_during_move_stops_source_deletion(self):
+        router = Router(dns=[DnsRoute('a', 'group', 'old')])
+        router.before_write = lambda: router.dns.append(DnsRoute('foreign', 'group', 'other')) if not router.writes else None
+        with self.assertRaisesRegex(KeeneticError, 'изменились во время'):
+            router.move_dns_routes(['a'], 'new', single_interface=True)
+        self.assertTrue(any(r.index == 'a' for r in router.dns))
+        self.assertEqual(len(router.writes), 1)
+
+    def test_new_binding_during_delete_is_not_reported_as_single_rule(self):
+        router = Router(dns=[DnsRoute('a', 'group', 'old'), DnsRoute('target', 'group', 'new')])
+        router.before_write = lambda: router.dns.append(DnsRoute('foreign', 'group', 'other')) if not router.writes else None
+        with self.assertRaisesRegex(KeeneticError, 'завершение переноса'):
+            router.move_dns_routes(['a', 'target'], 'new', single_interface=True)
+        self.assertEqual(len(router.writes), 1)
+        self.assertTrue(any(r.index == 'foreign' for r in router.dns))
+
+    def test_duplicate_target_is_not_reported_as_single_rule(self):
+        router = Router(dns=[DnsRoute('a', 'group', 'old'), DnsRoute('b', 'group', 'new'), DnsRoute('c', 'group', 'new')])
+        with self.assertRaisesRegex(KeeneticError, 'несколько правил'):
+            router.move_dns_routes(['a', 'b', 'c'], 'new', single_interface=True)
+        self.assertEqual(router.writes, [])
+
+    def test_old_duplicate_binding_is_deleted_once(self):
+        router = Router(dns=[DnsRoute('a', 'group', 'old'), DnsRoute('b', 'group', 'old')])
+        router.move_dns_routes(['a', 'b'], 'new', single_interface=True)
+        self.assertEqual(len(router.dns), 1)
+        self.assertEqual(len(router.writes[-1][0]), 1)
+
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -527,6 +573,20 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual((result.get_json()['dns'], result.get_json()['ip']), (1, 1))
         self.assertEqual((self.router.dns[0].interface, self.router.ip[0].interface), ('new', 'new'))
+
+    def test_unified_single_interface_replaces_whole_selected_group(self):
+        self.router.dns = [DnsRoute('a', 'group', 'old'), DnsRoute('b', 'group', 'other'),
+                           DnsRoute('keep', 'group', 'new'), DnsRoute('other-list', 'another', 'old')]
+        before_ip = signatures(self.router.ip)
+        snapshots = [r.to_dict() for r in self.router.dns if r.group == 'group']
+        result = self.post('/api/router/move', groups=['group'], ip_indices=[], interface='new',
+                           **{'from': 'old', 'single_dns_interface': True, 'expected_dns_routes': snapshots,
+                              'expected_ip_routes': []})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual((result.get_json()['dns'], result.get_json()['dns_groups']), (2, 1))
+        self.assertEqual([(r.index, r.interface) for r in self.router.dns if r.group == 'group'], [('keep', 'new')])
+        self.assertTrue(any(r.index == 'other-list' for r in self.router.dns))
+        self.assertEqual(signatures(self.router.ip), before_ip)
 
     def test_dns_options_backup_contains_original_flags(self):
         import json

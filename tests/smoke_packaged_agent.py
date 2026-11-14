@@ -10,6 +10,7 @@ import threading
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'dist/RouteDeck.exe'
 received = []
 
 
@@ -31,7 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8')
     from PyInstaller.archive.readers import CArchiveReader
-    archive = CArchiveReader(str(ROOT / 'dist/RouteDeck.exe'))
+    archive = CArchiveReader(str(EXE))
     for relative in ['static/js/app.js', 'static/css/styles.css', 'templates/index.html']:
         entry = next(name for name in archive.toc if name.replace('\\', '/') == relative)
         assert archive.extract(entry) == (ROOT / relative).read_bytes(), f'Outdated packaged resource: {relative}'
@@ -41,7 +42,7 @@ if __name__ == '__main__':
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             log = Path(tmp) / 'agent.log'
-            result = subprocess.run([str(ROOT / 'dist/RouteDeck.exe'), '--capture-agent',
+            result = subprocess.run([str(EXE), '--capture-agent',
                 '--url', f'http://127.0.0.1:{server.server_port}', '--token', 'packaged-test', '--log', str(log)],
                 timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
             assert result.returncode == 0, f'Agent exit code: {result.returncode}'

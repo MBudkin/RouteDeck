@@ -226,6 +226,24 @@ def reset_router(rid: str = None):
             _router_clients.pop(rid, None)
 
 
+def backup_router_change(client: KeeneticClient, operation: str) -> str:
+    """Копия до изменения. Ошибка записи на диск останавливает операцию."""
+    folder = os.path.join(DATA_DIR, 'backups')
+    os.makedirs(folder, exist_ok=True)
+    filename = f'before-{operation}-{datetime.now():%Y%m%d-%H%M%S-%f}.json'
+    backup = os.path.join(folder, filename)
+    data = transfer.export_config(client, app_name=APP_NAME)
+    data['operation'] = operation
+    data['router_id'] = router_id()
+    # Дополнительно сохраняем шлюзы, метрики, маршрут по умолчанию и index.
+    data['ip_routes_snapshot'] = [r.to_dict() for r in client.ip_routes()]
+    with open(backup, 'x', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    logger.info('Копия перед %s: DNS-списков %s, IP-маршрутов %s; %s',
+                operation, len(data['groups']), len(data['ip_routes_snapshot']), backup)
+    return backup
+
+
 def remember_interface(interface: str):
     settings.update(router_id(), default_interface=interface)
 
@@ -636,10 +654,15 @@ def router_dns_route_toggle():
 def router_dns_route_update():
     """Меняет параметры правила: «эксклюзивный маршрут» и «добавлять автоматически»."""
     data = body()
-    route = router().update_dns_route(str(data.get('index', '')),
-                                      auto=bool(data.get('auto', True)),
-                                      reject=bool(data.get('reject', False)))
-    return jsonify({'success': True, 'route': route.to_dict(), 'message': 'Правило обновлено'})
+    client = router()
+    with client._lock:
+        backup = backup_router_change(client, 'dns-options')
+        route = client.update_dns_route(str(data.get('index', '')),
+                                        auto=bool(data.get('auto', True)),
+                                        reject=bool(data.get('reject', False)),
+                                        expected_route=data.get('expected_route'))
+    return jsonify({'success': True, 'route': route.to_dict(), 'backup': backup,
+                    'message': 'Параметры правила сохранены и проверены на роутере'})
 
 
 @app.route('/api/router/dns-routes/delete', methods=['POST'])
@@ -656,9 +679,14 @@ def router_dns_routes_move():
     data = body()
     if not data.get('interface'):
         raise ValueError('Выберите интерфейс')
-    moved = router().move_dns_routes([str(i) for i in data.get('indices') or []], data['interface'])
+    client = router()
+    indices = [str(i) for i in data.get('indices') or []]
+    with client._lock:
+        client.validate_dns_move(indices, data['interface'], data.get('expected_routes'))
+        backup = backup_router_change(client, 'dns-move')
+        moved = client.move_dns_routes(indices, data['interface'], data.get('expected_routes'))
     remember_interface(data['interface'])
-    return jsonify({'success': True, 'moved': moved, 'message': f'Переведено правил: {moved}'})
+    return jsonify({'success': True, 'moved': moved, 'backup': backup, 'message': f'Переведено правил: {moved}'})
 
 
 @app.route('/api/router/ip-routes/move', methods=['POST'])
@@ -668,8 +696,13 @@ def router_ip_routes_move():
     data = body()
     if not data.get('interface'):
         raise ValueError('Выберите интерфейс')
-    moved = router().move_ip_routes([str(i) for i in data.get('indices') or []], data['interface'])
-    return jsonify({'success': True, 'moved': moved, 'message': f'Переведено маршрутов: {moved}'})
+    client = router()
+    indices = [str(i) for i in data.get('indices') or []]
+    with client._lock:
+        client.validate_ip_move(indices, data['interface'], data.get('expected_routes'))
+        backup = backup_router_change(client, 'ip-move')
+        moved = client.move_ip_routes(indices, data['interface'], data.get('expected_routes'))
+    return jsonify({'success': True, 'moved': moved, 'backup': backup, 'message': f'Переведено маршрутов: {moved}'})
 
 
 @app.route('/api/router/export', methods=['GET'])
@@ -800,13 +833,21 @@ def router_move():
     client = router()
     groups = set(data.get('groups') or [])
     source = data.get('from') or ''
-    dns_indices = [r.index for r in client.dns_routes()
-                   if r.group in groups and (not source or r.interface == source)]
-    moved_dns = client.move_dns_routes(dns_indices, interface) if dns_indices else 0
-    ip_indices = [str(i) for i in data.get('ip_indices') or []]
-    moved_ip = client.move_ip_routes(ip_indices, interface) if ip_indices else 0
+    with client._lock:
+        dns_indices = [r.index for r in client.dns_routes()
+                       if r.group in groups and (not source or r.interface == source)]
+        ip_indices = [str(i) for i in data.get('ip_indices') or []]
+        expected_dns = data.get('expected_dns_routes')
+        expected_ip = data.get('expected_ip_routes')
+        # Проверяем обе части до первой записи: устаревший IP-выбор не должен
+        # приводить даже к частичному переносу DNS-списков.
+        client.validate_dns_move(dns_indices, interface, expected_dns)
+        client.validate_ip_move(ip_indices, interface, expected_ip)
+        backup = backup_router_change(client, 'tunnel-move')
+        moved_dns = client.move_dns_routes(dns_indices, interface, expected_dns) if dns_indices else 0
+        moved_ip = client.move_ip_routes(ip_indices, interface, expected_ip) if ip_indices else 0
     remember_interface(interface)
-    return jsonify({'success': True, 'dns': moved_dns, 'ip': moved_ip,
+    return jsonify({'success': True, 'dns': moved_dns, 'ip': moved_ip, 'backup': backup,
                     'message': f'Переведено: правил {moved_dns}, IP-маршрутов {moved_ip}'})
 
 

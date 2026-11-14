@@ -7,7 +7,7 @@ const ipFixture = {
              {index: '3', destination: '9.9.9.9/32', comment: '', interface: 'Wireguard0', interface_title: 'Основной VPN', enabled: true},
              {index: '4', destination: '149.154.160.0/20', comment: 'Смешанная группа', interface: 'Wireguard0', interface_title: 'Основной VPN', enabled: true},
              {index: '5', destination: '91.108.56.0/22', comment: 'Смешанная группа', interface: 'Wireguard1', interface_title: 'Рабочий VPN', enabled: true}],
-    requests: [], pending: [], delay: false, fail: false, overviewDelay: false, overviewResolve: null, overviewFail: false,
+    moveFail: false, requests: [], pending: [], delay: false, fail: false, overviewDelay: false, overviewResolve: null, overviewFail: false,
 };
 window.fetch = async (url, options = {}) => {
     const payload = options.body ? JSON.parse(options.body) : null;
@@ -29,6 +29,14 @@ window.fetch = async (url, options = {}) => {
         const ids = payload.indices || [payload.index];
         ipFixture.routes.forEach((r) => { if (ids.includes(r.index)) r.enabled = payload.enabled; });
         body.message = 'Готово';
+    } else if (url === '/api/router/ip-routes/move' || url === '/api/router/move') {
+        if (ipFixture.moveFail) return {ok: false, json: async () => ({success: false, error: 'Перенос остановлен: подключение удалено'})};
+        const ids = payload.indices || payload.ip_indices;
+        ipFixture.routes.forEach((r) => { if (ids.includes(r.index)) {
+            r.interface = payload.interface;
+            r.interface_title = ipFixture.interfaces.find((i) => i.id === payload.interface)?.description;
+        }});
+        body.message = 'Перенос проверен'; body.moved = ids.length;
     } else if (url === '/api/router/ip-routes/comment') {
         ipFixture.routes.forEach((r) => { if (payload.indices.includes(r.index)) r.comment = payload.comment; });
         body.message = `Описание обновлено у ${payload.indices.length}`;
@@ -198,6 +206,52 @@ window.addEventListener('load', async () => {
 
         switchTab('ip');
         await ensureIpRoutes();
+        // Выбор галочками: одиночное окно и общий перенос нескольких групп.
+        const beforeMoves = structuredClone(ipFixture.routes);
+        state.ipSelected.clear(); renderIpRoutes();
+        $('[data-action="ipg-select"][data-comment="Discord"]').click();
+        const checkedIds = [...state.ipSelected];
+        const untouchedBefore = ipFixture.routes.filter((r) => !checkedIds.includes(r.index));
+        $('[data-action="ip-move-selected"]').click();
+        let moveForm = $('#ipmove-form');
+        assert(!!moveForm && checkedIds.length === ipGroupRoutes('Discord').length,
+               'Галочка группы передаёт в смену туннеля все её IP-маршруты');
+        moveForm.to.value = 'Wireguard0'; moveForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#ipmove-form'); n++) await tick();
+        await tick();
+        const movedCall = ipFixture.requests.filter((r) => r.url === '/api/router/ip-routes/move').at(-1).payload;
+        assert(JSON.stringify(movedCall.indices) === JSON.stringify(checkedIds)
+               && movedCall.expected_routes.length === checkedIds.length
+               && movedCall.expected_routes.every((r) => r.interface === 'Wireguard1'),
+               'Перенос передаёт снимок именно отмеченных маршрутов с исходным подключением');
+        assert(checkedIds.every((i) => state.ipRoutes.find((r) => r.index === i).interface === 'Wireguard0')
+               && untouchedBefore.every((r) => state.ipRoutes.find((x) => x.index === r.index).interface === r.interface)
+               && !state.ipSelected.size, 'После переноса адреса и чужие группы сохранены, выбор очищен');
+        ipFixture.routes = structuredClone(beforeMoves); await loadIpRoutes();
+
+        await openMove({ipComments: ['Discord', 'Смешанная группа'], from: 'Wireguard1'});
+        moveForm = $('#move-form'); moveForm.to.value = 'Wireguard0';
+        moveForm.dispatchEvent(new Event('change', {bubbles: true})); moveForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#move-form'); n++) await tick();
+        await tick();
+        const unifiedCall = ipFixture.requests.filter((r) => r.url === '/api/router/move').at(-1).payload;
+        const fromIds = beforeMoves.filter((r) => r.interface === 'Wireguard1').map((r) => r.index).sort();
+        assert(JSON.stringify([...unifiedCall.ip_indices].sort()) === JSON.stringify(fromIds)
+               && unifiedCall.expected_ip_routes.every((r) => r.interface === 'Wireguard1')
+               && unifiedCall.expected_dns_routes.length === 0, 'Общий перенос выбранных групп соблюдает фильтр исходного туннеля');
+        ipFixture.routes = structuredClone(beforeMoves); await loadIpRoutes();
+
+        ipFixture.moveFail = true; openIpMove(['1']); moveForm = $('#ipmove-form');
+        state.ipRoutes.find((r) => r.index === '1').comment = 'Локальное изменение';
+        moveForm.to.value = 'Wireguard0'; moveForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#ipmove-form'); n++) await tick();
+        await tick();
+        const failedCall = ipFixture.requests.filter((r) => r.url === '/api/router/ip-routes/move').at(-1).payload;
+        assert(failedCall.expected_routes[0].comment === 'Discord'
+               && state.ipRoutes.find((r) => r.index === '1').interface === 'Wireguard1'
+               && !$('#ipmove-form'), 'Снимок выбора неизменяем, после ошибки окно закрывается и маршруты перечитываются');
+        ipFixture.moveFail = false;
+
         storage('s4r-ip-collapsed', '[]');
         renderIpRoutes();
         const collapseAll = $('#ip-collapse-all');

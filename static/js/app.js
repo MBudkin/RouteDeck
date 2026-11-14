@@ -1125,7 +1125,8 @@ function openGroupEdit(name) {
 
 function openRouteEdit(index) {
     const g = state.groups.find((x) => x.routes.some((r) => r.index === index));
-    const r = g?.routes.find((x) => x.index === index);
+    const original = g?.routes.find((x) => x.index === index);
+    const r = original ? {...original} : null;
     if (!r) return;
     openModal({
         title: 'Настройки правила',
@@ -1135,6 +1136,7 @@ function openRouteEdit(index) {
             <form id="route-edit-form" class="options">
                 <label class="switch-label"><span class="switch"><input type="checkbox" name="reject" ${r.reject ? 'checked' : ''}><span></span></span>Эксклюзивный маршрут</label>
                 <small>Если туннель недоступен, сайты из списка не откроются напрямую — трафик не «утечёт» мимо VPN.</small>
+                <small>Параметры применяются после «Сохранить» без перезапуска роутера. Для выключенного правила — после его включения.</small>
                 <label class="switch-label"><span class="switch"><input type="checkbox" name="auto" ${r.auto ? 'checked' : ''}><span></span></span>Добавлять автоматически</label>
                 <small>Маршрут действует, только пока подключение активно. Обычно оставляют включённым.</small>
             </form>`,
@@ -1147,8 +1149,8 @@ function openRouteEdit(index) {
                 if (f.reject.checked === r.reject && f.auto.checked === r.auto) return close();
                 await withButton($('.modal-foot .primary', el), async () => {
                     try {
-                        await api('/api/router/dns-routes/update', 'POST', { index, auto: f.auto.checked, reject: f.reject.checked });
-                        toast(`Правило «${g.title}» обновлено`, 'success');
+                        await api('/api/router/dns-routes/update', 'POST', { index, auto: f.auto.checked, reject: f.reject.checked, expected_route: {...r} });
+                        toast(`Параметры «${g.title}» сохранены и проверены на роутере`, 'success');
                         close();
                         await loadOverview({ quiet: true });
                     } catch (err) {
@@ -1294,8 +1296,8 @@ async function openMove(preset = {}) {
         }
         loading.close();
     }
-    const routes = state.groups.flatMap((g) => g.routes);
-    const ipg = ipGroups();
+    const routes = state.groups.flatMap((g) => g.routes).map((r) => ({...r}));
+    const ipg = ipGroups().map((g) => ({...g, routes: g.routes.map((r) => ({...r}))}));
     const used = new Map();
     routes.forEach((r) => used.set(r.interface, r.interface_title));
     (state.ipRoutes || []).forEach((r) => r.interface && used.set(r.interface, r.interface_title));
@@ -1349,11 +1351,12 @@ async function openMove(preset = {}) {
                 const src = f.from.value;
                 const groups = $$('input[name=g]:checked', f).map((c) => c.value);
                 const dnsCount = routes.filter((r) => groups.includes(r.group) && (!src || r.interface === src) && r.interface !== f.to.value).length;
-                const ipIdx = $$('input[name=ip]:checked', f)
+                const ipRoutes = $$('input[name=ip]:checked', f)
                     .flatMap((c) => ipg[+c.value].routes)
-                    .filter((r) => (!src || r.interface === src) && r.interface !== f.to.value)
-                    .map((r) => r.index);
-                return { src, groups, dnsCount, ipIdx };
+                    .filter((r) => (!src || r.interface === src) && r.interface !== f.to.value);
+                const ipIdx = ipRoutes.map((r) => r.index);
+                const dnsRoutes = routes.filter((r) => groups.includes(r.group) && (!src || r.interface === src));
+                return { src, groups, dnsCount, ipIdx, ipRoutes, dnsRoutes };
             };
             const summary = () => {
                 const s = selection();
@@ -1387,13 +1390,20 @@ async function openMove(preset = {}) {
                     try {
                         const res = await api('/api/router/move', 'POST', {
                             groups: s.groups, from: s.src, ip_indices: s.ipIdx, interface: f.to.value,
+                            expected_ip_routes: s.ipRoutes, expected_dns_routes: s.dnsRoutes,
                         });
                         toast(`${res.message} → ${ifaceTitle(f.to.value)}`, 'success');
                         close();
+                        state.ipSelected.clear();
                         invalidateIpRoutes();
                         await loadOverview({ quiet: true });
+                        await ensureIpRoutes();
                     } catch (err) {
                         toast(err.message, 'error');
+                        close();
+                        invalidateIpRoutes();
+                        await loadOverview({ quiet: true });
+                        await ensureIpRoutes();
                     }
                 });
             };
@@ -1402,7 +1412,8 @@ async function openMove(preset = {}) {
 }
 
 function openIpMove(indices = [...state.ipSelected]) {
-    const selected = state.ipRoutes.filter((r) => indices.includes(r.index));
+    const selected = (state.ipRoutes || []).filter((r) => indices.includes(r.index)).map((r) => ({...r}));
+    if (!selected.length || selected.length !== new Set(indices).size) return toast('Обновите маршруты и повторите выбор', 'error');
     const current = [...new Set(selected.map((r) => r.interface_title))];
     openModal({
         title: 'Сменить интерфейс',
@@ -1421,13 +1432,18 @@ function openIpMove(indices = [...state.ipSelected]) {
                 const to = e.target.to.value;
                 await withButton($('.modal-foot .primary', el), async () => {
                     try {
-                        const data = await api('/api/router/ip-routes/move', 'POST', { indices, interface: to });
+                        const data = await api('/api/router/ip-routes/move', 'POST', { indices, interface: to, expected_routes: selected });
                         toast(`${data.message} → ${ifaceTitle(to)}`, 'success');
                         close();
+                        state.ipSelected.clear();
                         invalidateIpRoutes();
                         await loadIpRoutes();
                     } catch (err) {
                         toast(err.message, 'error');
+                        close();
+                        invalidateIpRoutes();
+                        await loadOverview({ quiet: true });
+                        await ensureIpRoutes();
                     }
                 });
             };

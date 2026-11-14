@@ -24,7 +24,7 @@ import ipaddress
 import logging
 import re
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
@@ -62,6 +62,10 @@ _DOMAIN_RE = re.compile(
 
 class KeeneticError(RuntimeError):
     """Ошибка при работе с роутером."""
+
+
+class KeeneticWriteUncertainError(KeeneticError):
+    """Ответ на запись потерян; повторять команды или откат вслепую нельзя."""
 
 
 class KeeneticAuthError(KeeneticError):
@@ -111,6 +115,7 @@ class IpRoute:
     reject: bool = False
     enabled: bool = True
     comment: str = ''
+    metric: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -324,12 +329,13 @@ class KeeneticClient:
                 except requests.ReadTimeout as e:
                     if method != 'GET':
                         # Соединение было, команды переданы - роутер их ещё выполняет.
-                        raise KeeneticError(
+                        raise KeeneticWriteUncertainError(
                             f'Роутер не ответил за {timeout[1]:.0f} с, но команды, скорее всего, '
                             'ещё выполняются. Подождите минуту и обновите страницу.') from e
                     raise KeeneticError(f'Роутер не ответил за {timeout[1]:.0f} с: {e}') from e
                 except requests.RequestException as e:
-                    raise KeeneticError(f'Роутер недоступен: {e}') from e
+                    error = KeeneticError if method == 'GET' else KeeneticWriteUncertainError
+                    raise error(f'Роутер недоступен: {e}') from e
                 if resp.status_code == 401 and attempt == 0:
                     # Сессия истекла (5 минут простоя) - входим заново.
                     self._authenticated = False
@@ -550,55 +556,101 @@ class KeeneticClient:
     def delete_dns_route(self, index: str) -> None:
         self.write([{'dns-proxy': {'route': {'index': index, 'no': True}}}])
 
-    def update_dns_route(self, index: str, auto: bool, reject: bool) -> DnsRoute:
-        """
-        Меняет параметры правила («добавлять автоматически», «эксклюзивный»).
-        RCI не даёт изменить их на месте, поэтому правило пересоздаётся: удаляется
-        и тут же добавляется в одном пакете. После записи проверяем результат и при
-        необходимости восстанавливаем правило.
-        """
-        route = next((r for r in self.dns_routes() if r.index == index), None)
-        if route is None:
-            raise KeeneticError('Правило не найдено — обновите страницу')
-        data: Dict[str, Any] = {'group': route.group, 'interface': route.interface,
-                                'auto': auto, 'reject': reject}
-        if not route.enabled:
-            data['disable'] = True
-        try:
-            self.write([{'dns-proxy': {'route': {'index': index, 'no': True}}},
-                        {'dns-proxy': {'route': data}}])
-        finally:
-            present = [r for r in self.dns_routes()
-                       if r.group == route.group and r.interface == route.interface]
-            if not present:
-                logger.warning('Правило %s пропало после изменения - восстанавливаю', index)
-                self.write([{'dns-proxy': {'route': data}}])
-        return next((r for r in self.dns_routes()
-                     if r.group == route.group and r.interface == route.interface), route)
+    def _require_interface(self, interface: str) -> None:
+        if not interface or interface not in {i['id'] for i in self.interfaces()}:
+            raise KeeneticError('Выбранное подключение больше не существует на роутере. '
+                                'Обновите список и выберите подключение заново.')
 
-    def move_dns_routes(self, indices: Iterable[str], interface: str) -> int:
-        """Пересоздаёт правила с другим интерфейсом, сохраняя остальные параметры."""
-        wanted = set(indices)
+    def update_dns_route(self, index: str, auto: bool, reject: bool,
+                         expected_route: Optional[Dict[str, Any]] = None) -> DnsRoute:
+        """Применяет флаги после сохранения и проверяет их чтением с роутера."""
+        if not index:
+            raise ValueError('Не выбрано DNS-правило')
+        with self._lock:
+            all_routes = self.dns_routes()
+            route = _selected_routes(all_routes, [index],
+                                     [expected_route] if expected_route is not None else None)[0]
+            if any(r.index != route.index and (r.group, r.interface) == (route.group, route.interface)
+                   for r in all_routes):
+                raise KeeneticError('У DNS-списка есть совпадающие правила. Сначала проверьте правила.')
+            self._require_interface(route.interface)
+            desired = replace(route, auto=auto, reject=reject)
+            if _route_signature(route) == _route_signature(desired):
+                return route
+            try:
+                self.write([_delete_dns_command(route), _dns_command(desired)], save=False)
+                binding = [r for r in self.dns_routes()
+                           if (r.group, r.interface) == (route.group, route.interface)]
+                actual = binding[0] if len(binding) == 1 else None
+                if actual is None or _route_signature(actual) != _route_signature(desired):
+                    raise KeeneticError('Роутер не подтвердил параметры DNS-правила')
+            except KeeneticWriteUncertainError:
+                # Таймаут не означает, что пакет остановился. Не повторяем его.
+                raise
+            except KeeneticError as error:
+                # После завершённой неудачной записи возвращаем исходные флаги,
+                # включая выключенное состояние. Запрошенные флаги не выдаём за успех.
+                present = self.dns_routes()
+                binding = [r for r in present if (r.group, r.interface) == (route.group, route.interface)]
+                if len(binding) != 1 or _route_signature(binding[0]) != _route_signature(route):
+                    self.write([_delete_dns_command(route), _dns_command(route)])
+                if not any(_route_signature(r) == _route_signature(route) for r in self.dns_routes()):
+                    raise KeeneticError('Не удалось восстановить DNS-правило. Используйте резервную копию.') from error
+                raise KeeneticError(f'{error}. Исходное DNS-правило сохранено.') from error
+            self.write([])  # Сохраняем только подтверждённые параметры.
+            return actual
+
+    def validate_dns_move(self, indices: Iterable[str], interface: str,
+                          expected_routes: Optional[List[Dict[str, Any]]] = None):
+        self._require_interface(interface)
         all_routes = self.dns_routes()
-        routes = [r for r in all_routes if r.index in wanted and r.interface != interface]
-        # У списка уже есть правило на целевой интерфейс - второе не создаём.
-        on_target = {r.group for r in all_routes if r.interface == interface}
-        # Сначала создаём новые правила, потом удаляем старые: если роутер отклонит
-        # команду посреди пакета, трафик не останется без маршрута.
-        commands = []
-        for r in routes:
-            if r.group in on_target:
-                continue
-            on_target.add(r.group)
-            data: Dict[str, Any] = {'group': r.group, 'interface': interface,
-                                    'auto': r.auto, 'reject': r.reject}
-            if not r.enabled:
-                data['disable'] = True
-            commands.append({'dns-proxy': {'route': data}})
-        commands += [{'dns-proxy': {'route': {'index': r.index, 'no': True}}} for r in routes]
-        if commands:
-            self.write(commands)
-        return len(routes)
+        selected = _selected_routes(all_routes, indices, expected_routes)
+        routes = [r for r in selected if r.interface != interface]
+        chosen = {r.index for r in selected}
+        source_keys = {(r.group, r.interface) for r in routes}
+        if any((r.group, r.interface) in source_keys and r.index not in chosen for r in all_routes):
+            raise KeeneticError('У выбранных DNS-списков есть совпадающие правила. '
+                                'Сначала проверьте правила: перенос остановлен до изменений.')
+        targets = {}
+        for route in routes:
+            desired = replace(route, index='', interface=interface)
+            key = (desired.group, desired.interface)
+            existing = [r for r in all_routes if (r.group, r.interface) == key]
+            if key in targets:
+                existing.append(targets[key])
+            if any(_route_signature(r) != _route_signature(desired) for r in existing):
+                raise KeeneticError('На выбранном подключении есть DNS-правило с другими параметрами. '
+                                    'Согласуйте параметры перед переносом.')
+            targets[key] = desired
+        return routes, list(targets.values())
+
+    def move_dns_routes(self, indices: Iterable[str], interface: str,
+                        expected_routes: Optional[List[Dict[str, Any]]] = None) -> int:
+        """Сначала создаёт и проверяет новые правила, затем убирает исходные."""
+        with self._lock:
+            routes, targets = self.validate_dns_move(indices, interface, expected_routes)
+            if not routes:
+                return 0
+            present = {_route_signature(r) for r in self.dns_routes()}
+            commands = [_dns_command(r) for r in targets if _route_signature(r) not in present]
+            if commands:
+                self.write(commands, save=False)
+            after = self.dns_routes()
+            _confirm_targets(targets, after)
+            # Служебный index может измениться/переиспользоваться после записи.
+            # Удаляем по исходной паре список/интерфейс, отдельно от добавления.
+            self._require_interface(interface)
+            originals = {(r.group, r.interface): _route_signature(r) for r in routes}
+            if any((r.group, r.interface) in originals and _route_signature(r) != originals[(r.group, r.interface)] for r in after):
+                raise KeeneticError('Исходные DNS-правила изменились во время переноса. Удаление остановлено.')
+            source_keys = {(r.group, r.interface) for r in after}
+            self.write([_delete_dns_command(r) for r in routes if (r.group, r.interface) in source_keys])
+            after = self.dns_routes()
+            _confirm_targets(targets, after)
+            remaining = {(r.group, r.interface) for r in after}
+            if any((r.group, r.interface) in remaining for r in routes):
+                raise KeeneticError('Новые DNS-правила созданы, но старые остались. Обновите список.')
+            return len(routes)
 
     # --- статические IPv4-маршруты (ip route) ---
 
@@ -629,6 +681,7 @@ class KeeneticClient:
                 reject=bool(item.get('reject', False)),
                 enabled=not bool(item.get('disable', False)),
                 comment=str(item.get('comment', '')),
+                metric=item.get('metric'),
             ))
         return routes
 
@@ -675,22 +728,59 @@ class KeeneticClient:
             self.write(commands)
         return len(commands)
 
-    def move_ip_routes(self, indices: Iterable[str], interface: str) -> int:
-        """Переводит статические маршруты на другой интерфейс."""
-        wanted = set(indices)
+    def validate_ip_move(self, indices: Iterable[str], interface: str,
+                         expected_routes: Optional[List[Dict[str, Any]]] = None):
+        self._require_interface(interface)
         all_routes = self.ip_routes()
-        routes = [r for r in all_routes if r.index in wanted and r.interface != interface]
-        on_target = {r.destination for r in all_routes if r.interface == interface}
-        commands = []
-        for r in routes:
-            if r.destination not in on_target:  # на целевом интерфейсе такого маршрута ещё нет
-                commands.append(ip_route_command(r, interface=interface))
-                on_target.add(r.destination)
-        # Старые маршруты удаляем только после добавления новых.
-        commands += [{'ip': {'route': {'index': r.index, 'no': True}}} for r in routes]
-        if commands:
-            self.write(commands)
-        return len(routes)
+        selected = _selected_routes(all_routes, indices, expected_routes)
+        routes = [r for r in selected if r.interface != interface]
+        chosen = {r.index for r in selected}
+        source_keys = {_ip_key(r) for r in routes}
+        if any(_ip_key(r) in source_keys and r.index not in chosen for r in all_routes):
+            raise KeeneticError('У выбранных адресов есть совпадающие маршруты в других группах. '
+                                'Сначала проверьте повторы: перенос остановлен до изменений.')
+        targets = {}
+        for route in routes:
+            desired = replace(route, index='', interface=interface, gateway='')
+            key = _ip_key(desired)
+            existing = [r for r in all_routes if _ip_key(r) == key]
+            if key in targets:
+                existing.append(targets[key])
+            if any(_route_signature(r) != _route_signature(desired) for r in existing):
+                raise KeeneticError('На выбранном подключении уже есть такой IP-маршрут '
+                                    'с другим описанием или параметрами. Перенос остановлен.')
+            targets[key] = desired
+        return routes, list(targets.values())
+
+    def move_ip_routes(self, indices: Iterable[str], interface: str,
+                       expected_routes: Optional[List[Dict[str, Any]]] = None) -> int:
+        """Перенос с проверкой новых маршрутов до удаления исходных."""
+        with self._lock:
+            routes, targets = self.validate_ip_move(indices, interface, expected_routes)
+            if not routes:
+                return 0
+            present = {_route_signature(r) for r in self.ip_routes()}
+            commands = [ip_route_command(r) for r in targets if _route_signature(r) not in present]
+            if commands:
+                self.write(commands, save=False)
+            after = self.ip_routes()
+            _confirm_targets(targets, after)
+            # RCI исполняет весь пакет, даже если одна из команд отклонена.
+            # Никогда не посылаем удаления вместе с непроверенными добавлениями.
+            # Полный исходный адрес/интерфейс/шлюз защищает и от смены index.
+            self._require_interface(interface)
+            originals = {_ip_key(r): _route_signature(r) for r in routes}
+            if any(_ip_key(r) in originals and _route_signature(r) != originals[_ip_key(r)] for r in after):
+                raise KeeneticError('Исходные IP-маршруты изменились во время переноса. Удаление остановлено.')
+            source_keys = {_ip_key(r) for r in after}
+            self.write([_delete_ip_command(r) for r in routes if _ip_key(r) in source_keys])
+            after = self.ip_routes()
+            _confirm_targets(targets, after)
+            remaining = {_ip_key(r) for r in after}
+            if any(_ip_key(r) in remaining for r in routes):
+                raise KeeneticError('Новые IP-маршруты созданы, но старые остались. Обновите список.')
+            logger.info('Перенос IP-маршрутов на %s подтверждён: %s', interface, len(routes))
+            return len(routes)
 
     def set_ip_routes_comment(self, indices: Iterable[str], comment: str) -> int:
         """
@@ -717,6 +807,61 @@ class KeeneticClient:
 
 # === Вспомогательные функции ===
 
+def _route_signature(route) -> tuple:
+    return tuple((k, v) for k, v in asdict(route).items() if k != 'index')
+
+
+def _selected_routes(routes, indices, expected=None) -> list:
+    wanted = {str(i) for i in indices if i}
+    selected = [r for r in routes if r.index in wanted]
+    if {r.index for r in selected} != wanted:
+        raise KeeneticError('Выбранные маршруты изменились на роутере. Обновите список и повторите выбор.')
+    if expected is not None:
+        if not isinstance(expected, list) or any(not isinstance(e, dict) for e in expected):
+            raise ValueError('Некорректный снимок выбранных маршрутов')
+        by_index = {str(e.get('index', '')): e for e in expected}
+        if set(by_index) != wanted or len(by_index) != len(expected):
+            raise KeeneticError('Выбор маршрутов изменился. Обновите список и повторите выбор.')
+        for route in selected:
+            snapshot = by_index[route.index]
+            identity = 'destination' if isinstance(route, IpRoute) else 'group'
+            if identity not in snapshot or 'interface' not in snapshot or any(
+                    key in snapshot and snapshot[key] != value for key, value in asdict(route).items()):
+                raise KeeneticError('Параметры выбранных маршрутов изменились на роутере. '
+                                    'Обновите список и повторите выбор.')
+    return selected
+
+
+def _confirm_targets(targets, present) -> None:
+    signatures = {_route_signature(r) for r in present}
+    if any(_route_signature(r) not in signatures for r in targets):
+        raise KeeneticError('Роутер не подтвердил новые маршруты. Перенос остановлен. '
+                            'Обновите список и проверьте подключение.')
+
+
+def _ip_key(route: IpRoute) -> tuple:
+    return route.destination, route.interface, route.gateway, route.metric
+
+
+def _delete_ip_command(route: IpRoute) -> Dict[str, Any]:
+    data = ip_route_command(route)['ip']['route']
+    for key in ('auto', 'reject', 'comment', 'disable'):
+        data.pop(key, None)
+    data['no'] = True
+    return {'ip': {'route': data}}
+
+
+def _dns_command(route: DnsRoute) -> Dict[str, Any]:
+    data = {k: v for k, v in asdict(route).items() if k not in ('index', 'enabled')}
+    if not route.enabled:
+        data['disable'] = True
+    return {'dns-proxy': {'route': data}}
+
+
+def _delete_dns_command(route: DnsRoute) -> Dict[str, Any]:
+    return {'dns-proxy': {'route': {'group': route.group, 'interface': route.interface, 'no': True}}}
+
+
 def is_routable(net: Any) -> bool:
     """False для адресов домашней сети, loopback, multicast и прочих служебных сетей."""
     net = ipaddress.ip_network(net, strict=False)
@@ -737,6 +882,8 @@ def ip_route_command(route: IpRoute, interface: Optional[str] = None,
         data['interface'] = iface
     if route.gateway and not interface:
         data['gateway'] = route.gateway
+    if route.metric is not None:
+        data['metric'] = route.metric
     if net.prefixlen == 0:
         data['default'] = True
     elif net.prefixlen == 32:

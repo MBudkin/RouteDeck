@@ -7,6 +7,14 @@ window.fetch = async (url, opts = {}) => {
     else if (url === '/api/sites') body.sites = [];
     else if (url === '/api/router/overview') Object.assign(body, {system: {model: 'Тестовый роутер', release: '5.0'}, interfaces: [],
         groups: state.groups, limit: 300, default_interface: ''});
+    else if (url === '/api/router/dns-routes/update') {
+        const payload = JSON.parse(opts.body);
+        window.dnsTestRequests.push({url, payload});
+        if (window.dnsOptionsFail) return {ok: false, json: async () => ({success: false, error: 'Параметры не подтверждены'})};
+        const rule = state.groups.flatMap((g) => g.routes).find((r) => r.index === payload.index);
+        Object.assign(rule, {auto: payload.auto, reject: payload.reject});
+        body.route = {...rule};
+    }
     else if (url === '/api/router/groups/merge') {
         const payload = JSON.parse(opts.body);
         window.dnsTestRequests.push({url, payload});
@@ -196,6 +204,32 @@ window.addEventListener('load', async () => {
               'Кнопки включения и выключения отражают состояние правил');
         check($$('#dns-bulk .icon-btn').every((b) => !b.textContent.trim() && (b.title || b.dataset.tip)),
               'Действия панели — значки с подсказками');
+
+        // Флажок эксклюзивности отправляется только при сохранении.
+        state.groups = [group(1, 2)];
+        let rule = state.groups[0].routes[0];
+        rule.group = state.groups[0].name; rule.reject = false;
+        renderGroups(); openRouteEdit(rule.index);
+        let optionsForm = $('#route-edit-form');
+        const optionsBefore = window.dnsTestRequests.filter((r) => r.url === '/api/router/dns-routes/update').length;
+        optionsForm.reject.click();
+        check(window.dnsTestRequests.filter((r) => r.url === '/api/router/dns-routes/update').length === optionsBefore
+              && $('#modal-root').textContent.includes('после «Сохранить»'), 'Флажок эксклюзивности до сохранения не отправляется на роутер, момент применения объяснён');
+        $('#modal-root [data-close]').click();
+        check(!rule.reject, 'Отмена не меняет эксклюзивность правила');
+        openRouteEdit(rule.index); optionsForm = $('#route-edit-form');
+        optionsForm.reject.checked = true; optionsForm.requestSubmit();
+        for (let n = 0; n < 20 && $('#route-edit-form'); n++) await tick();
+        await tick();
+        const optionsCall = window.dnsTestRequests.filter((r) => r.url === '/api/router/dns-routes/update').at(-1);
+        check(optionsCall?.payload.reject === true && optionsCall.payload.expected_route.reject === false
+              && state.groups[0].routes[0].reject === true, 'Сохранение отправляет эксклюзивность вместе со снимком исходного правила и обновляет флаги');
+        window.dnsOptionsFail = true;
+        openRouteEdit(rule.index); optionsForm = $('#route-edit-form'); optionsForm.reject.checked = false; optionsForm.requestSubmit();
+        await tick(); await tick();
+        check(state.groups[0].routes[0].reject === true && !!$('#route-edit-form'),
+              'Ошибка сохранения не выдаёт новые флаги за применённые');
+        window.dnsOptionsFail = false; $('#modal-root [data-close]').click();
 
         // Несколько роутеров: меню переключения и сброс данных прежнего роутера.
         state.settings = {has_password: true, active_router: 'r1', routers: [

@@ -7,8 +7,24 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from services import keenetic
+
 from services.keenetic import (KeeneticClient, KeeneticError, KeeneticWriteUncertainError,
                               IpRoute, DnsRoute, DomainGroup, _ip_key, _route_signature)
+
+
+class Clock:
+    def __init__(self): self.now = 0.0
+    def monotonic(self): return self.now
+    def sleep(self, delay): self.now += delay
+
+
+class VirtualTimeTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.timer_patch = patch.object(keenetic, 'time', self.clock)
+        self.timer_patch.start()
+        self.addCleanup(self.timer_patch.stop)
 
 
 class Router(KeeneticClient):
@@ -130,7 +146,7 @@ def signatures(routes):
     return {_route_signature(r) for r in routes}
 
 
-class MoveTests(unittest.TestCase):
+class MoveTests(VirtualTimeTests):
     def test_only_checked_noncontiguous_routes_move(self):
         router = Router([ip(), ip('2', '1.1.1.0/24'), ip('3', '9.9.9.9/32')])
         untouched = _route_signature(router.ip[1])
@@ -287,7 +303,7 @@ class MoveTests(unittest.TestCase):
         self.assertEqual([r.interface for r in router.ip], ['new'])
 
 
-class DnsTests(unittest.TestCase):
+class DnsTests(VirtualTimeTests):
     def route(self, **kwargs):
         return DnsRoute('dns1', 'group', 'old', **kwargs)
 
@@ -351,6 +367,101 @@ class DnsTests(unittest.TestCase):
         router = Router(dns=[self.route()]); router.timeout_add = True
         with self.assertRaises(KeeneticWriteUncertainError): router.update_dns_route('dns1', True, True)
         self.assertEqual(len(router.writes), 1)
+
+
+class LaggingRouter(Router):
+    """The real router returns the previous configuration for several seconds."""
+    def __init__(self, clock, ip=(), dns=(), lag=6):
+        super().__init__(ip, dns)
+        self.clock, self.lag = clock, lag
+        self.visible_at = 0
+        self.visible_ip, self.visible_dns = copy.deepcopy(self.ip), copy.deepcopy(self.dns)
+        self.write_times = []
+        self.freeze = False
+        self.lose_targets_on_delete = False
+
+    def write(self, commands, save=True):
+        self.write_times.append(self.clock.monotonic())
+        try:
+            return super().write(commands, save)
+        finally:
+            if self.lose_targets_on_delete and any(c.get('ip', {}).get('route', {}).get('no') for c in commands):
+                self.ip = [r for r in self.ip if r.interface != 'new']
+            self.visible_at = self.clock.monotonic() + self.lag
+
+    def refresh(self):
+        if not self.freeze and self.clock.monotonic() >= self.visible_at:
+            self.visible_ip, self.visible_dns = copy.deepcopy(self.ip), copy.deepcopy(self.dns)
+
+    def ip_routes(self):
+        self.refresh()
+        return copy.deepcopy(self.visible_ip)
+
+    def dns_routes(self):
+        self.refresh()
+        return copy.deepcopy(self.visible_dns)
+
+
+class VisibilityTests(VirtualTimeTests):
+    def test_ip_waits_for_addition_and_deletion_without_replaying_writes(self):
+        router = LaggingRouter(self.clock, [ip()])
+        self.assertEqual(router.move_ip_routes(['1'], 'new'), 1)
+        self.assertEqual([r.interface for r in router.ip_routes()], ['new'])
+        self.assertEqual(router.write_times, [0, 6])
+        self.assertEqual(self.clock.now, 12)
+        self.assertEqual(len(router.writes), 2)
+
+    def test_dns_waits_for_addition_and_deletion(self):
+        router = LaggingRouter(self.clock, dns=[DnsRoute('d', 'group', 'old', True, True, False)])
+        self.assertEqual(router.move_dns_routes(['d'], 'new'), 1)
+        self.assertEqual([(r.interface, r.reject, r.enabled) for r in router.dns_routes()], [('new', True, False)])
+        self.assertEqual(router.write_times, [0, 6])
+        self.assertEqual(self.clock.now, 12)
+
+    def test_existing_target_still_waits_for_source_removal(self):
+        router = LaggingRouter(self.clock, [ip(), ip('2', interface='new')])
+        router.move_ip_routes(['1'], 'new')
+        self.assertEqual([r.index for r in router.ip_routes()], ['2'])
+        self.assertEqual(len(router.writes), 1)
+        self.assertEqual(self.clock.now, 6)
+
+    def test_exclusive_options_wait_for_actual_flags(self):
+        router = LaggingRouter(self.clock, dns=[DnsRoute('d', 'group', 'old', False, False, False)])
+        actual = router.update_dns_route('d', True, True)
+        self.assertEqual((actual.auto, actual.reject, actual.enabled), (True, True, False))
+        self.assertEqual(self.clock.now, 6)
+        self.assertEqual(len(router.writes), 2)
+
+    def test_ignored_exclusive_flag_still_fails_and_preserves_original(self):
+        original = DnsRoute('d', 'group', 'old')
+        router = LaggingRouter(self.clock, dns=[original]); router.ignore_dns_once = True
+        with self.assertRaisesRegex(KeeneticError, 'не подтвердил'):
+            router.update_dns_route('d', True, True)
+        self.assertEqual(signatures(router.dns_routes()), signatures([original]))
+        self.assertEqual(len(router.writes), 2)
+        self.assertEqual(router.write_times, [0, keenetic.ROUTE_READBACK_TIMEOUT])
+        self.assertGreaterEqual(self.clock.now, keenetic.ROUTE_READBACK_TIMEOUT + 6)
+
+    def test_never_visible_target_times_out_without_source_deletion(self):
+        router = LaggingRouter(self.clock, [ip()]); router.freeze = True
+        with self.assertRaisesRegex(KeeneticError, 'Исходные маршруты не удалялись'):
+            router.move_ip_routes(['1'], 'new')
+        self.assertEqual(len(router.writes), 1)
+        self.assertTrue(any(r.interface == 'old' for r in router.ip))
+        self.assertEqual(self.clock.now, keenetic.ROUTE_READBACK_TIMEOUT)
+
+    def test_target_loss_after_delete_cannot_be_reported_as_success(self):
+        router = LaggingRouter(self.clock, [ip()]); router.lose_targets_on_delete = True
+        with self.assertRaisesRegex(KeeneticError, 'завершение переноса'):
+            router.move_ip_routes(['1'], 'new')
+        self.assertEqual(len(router.writes), 2)
+
+    def test_never_visible_deletion_times_out_without_replaying_delete(self):
+        router = LaggingRouter(self.clock, [ip(), ip('2', interface='new')]); router.freeze = True
+        with self.assertRaisesRegex(KeeneticError, 'завершение переноса'):
+            router.move_ip_routes(['1'], 'new')
+        self.assertEqual(len(router.writes), 1)
+        self.assertEqual([r.interface for r in router.ip], ['new'])
 
 
 class ApiTests(unittest.TestCase):

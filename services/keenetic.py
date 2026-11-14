@@ -24,6 +24,7 @@ import ipaddress
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field, asdict, replace
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -41,6 +42,11 @@ MAX_GROUP_ENTRIES = 300
 CONNECT_TIMEOUT = 10
 SECONDS_PER_COMMAND = 0.05
 MAX_WRITE_TIMEOUT = 600
+
+# Keenetic может несколько секунд возвращать прежний show/sc после успешной
+# записи. Ожидаем подтверждения чтением, не повторяя команды изменения.
+ROUTE_READBACK_TIMEOUT = 20.0
+ROUTE_READBACK_POLL = 0.5
 
 # Локальные и служебные сети: маршрут к ним через туннель уводит в него
 # ответы роутера компьютерам домашней сети, и веб-интерфейс перестаёт открываться.
@@ -579,11 +585,10 @@ class KeeneticClient:
                 return route
             try:
                 self.write([_delete_dns_command(route), _dns_command(desired)], save=False)
-                binding = [r for r in self.dns_routes()
-                           if (r.group, r.interface) == (route.group, route.interface)]
-                actual = binding[0] if len(binding) == 1 else None
-                if actual is None or _route_signature(actual) != _route_signature(desired):
-                    raise KeeneticError('Роутер не подтвердил параметры DNS-правила')
+                present = _wait_route_state(
+                    self.dns_routes, lambda rows: _dns_binding_matches(rows, desired),
+                    'Роутер не подтвердил параметры DNS-правила за 20 секунд')
+                actual = next(r for r in present if _route_signature(r) == _route_signature(desired))
             except KeeneticWriteUncertainError:
                 # Таймаут не означает, что пакет остановился. Не повторяем его.
                 raise
@@ -593,9 +598,11 @@ class KeeneticClient:
                 present = self.dns_routes()
                 binding = [r for r in present if (r.group, r.interface) == (route.group, route.interface)]
                 if len(binding) != 1 or _route_signature(binding[0]) != _route_signature(route):
-                    self.write([_delete_dns_command(route), _dns_command(route)])
-                if not any(_route_signature(r) == _route_signature(route) for r in self.dns_routes()):
-                    raise KeeneticError('Не удалось восстановить DNS-правило. Используйте резервную копию.') from error
+                    commands = [_delete_dns_command(route)] if binding else []
+                    self.write(commands + [_dns_command(route)])
+                _wait_route_state(
+                    self.dns_routes, lambda rows: _dns_binding_matches(rows, route),
+                    'Не удалось подтвердить восстановление DNS-правила. Используйте резервную копию.')
                 raise KeeneticError(f'{error}. Исходное DNS-правило сохранено.') from error
             self.write([])  # Сохраняем только подтверждённые параметры.
             return actual
@@ -635,8 +642,9 @@ class KeeneticClient:
             commands = [_dns_command(r) for r in targets if _route_signature(r) not in present]
             if commands:
                 self.write(commands, save=False)
-            after = self.dns_routes()
-            _confirm_targets(targets, after)
+            after = _wait_route_state(
+                self.dns_routes, lambda rows: _targets_present(targets, rows),
+                'Роутер не подтвердил новые DNS-маршруты за 20 секунд. Исходные правила не удалялись.')
             # Служебный index может измениться/переиспользоваться после записи.
             # Удаляем по исходной паре список/интерфейс, отдельно от добавления.
             self._require_interface(interface)
@@ -645,11 +653,12 @@ class KeeneticClient:
                 raise KeeneticError('Исходные DNS-правила изменились во время переноса. Удаление остановлено.')
             source_keys = {(r.group, r.interface) for r in after}
             self.write([_delete_dns_command(r) for r in routes if (r.group, r.interface) in source_keys])
-            after = self.dns_routes()
-            _confirm_targets(targets, after)
-            remaining = {(r.group, r.interface) for r in after}
-            if any((r.group, r.interface) in remaining for r in routes):
-                raise KeeneticError('Новые DNS-правила созданы, но старые остались. Обновите список.')
+            sources = {(r.group, r.interface) for r in routes}
+            _wait_route_state(
+                self.dns_routes,
+                lambda rows: _targets_present(targets, rows) and not sources.intersection(
+                    (r.group, r.interface) for r in rows),
+                'Роутер не подтвердил завершение переноса DNS за 20 секунд. Обновите список.')
             return len(routes)
 
     # --- статические IPv4-маршруты (ip route) ---
@@ -763,8 +772,9 @@ class KeeneticClient:
             commands = [ip_route_command(r) for r in targets if _route_signature(r) not in present]
             if commands:
                 self.write(commands, save=False)
-            after = self.ip_routes()
-            _confirm_targets(targets, after)
+            after = _wait_route_state(
+                self.ip_routes, lambda rows: _targets_present(targets, rows),
+                'Роутер не подтвердил новые IP-маршруты за 20 секунд. Исходные маршруты не удалялись.')
             # RCI исполняет весь пакет, даже если одна из команд отклонена.
             # Никогда не посылаем удаления вместе с непроверенными добавлениями.
             # Полный исходный адрес/интерфейс/шлюз защищает и от смены index.
@@ -774,11 +784,11 @@ class KeeneticClient:
                 raise KeeneticError('Исходные IP-маршруты изменились во время переноса. Удаление остановлено.')
             source_keys = {_ip_key(r) for r in after}
             self.write([_delete_ip_command(r) for r in routes if _ip_key(r) in source_keys])
-            after = self.ip_routes()
-            _confirm_targets(targets, after)
-            remaining = {_ip_key(r) for r in after}
-            if any(_ip_key(r) in remaining for r in routes):
-                raise KeeneticError('Новые IP-маршруты созданы, но старые остались. Обновите список.')
+            sources = {_ip_key(r) for r in routes}
+            _wait_route_state(
+                self.ip_routes,
+                lambda rows: _targets_present(targets, rows) and not sources.intersection(_ip_key(r) for r in rows),
+                'Роутер не подтвердил завершение переноса IP за 20 секунд. Обновите список.')
             logger.info('Перенос IP-маршрутов на %s подтверждён: %s', interface, len(routes))
             return len(routes)
 
@@ -832,11 +842,28 @@ def _selected_routes(routes, indices, expected=None) -> list:
     return selected
 
 
-def _confirm_targets(targets, present) -> None:
+def _targets_present(targets, present) -> bool:
     signatures = {_route_signature(r) for r in present}
-    if any(_route_signature(r) not in signatures for r in targets):
-        raise KeeneticError('Роутер не подтвердил новые маршруты. Перенос остановлен. '
-                            'Обновите список и проверьте подключение.')
+    return all(_route_signature(r) in signatures for r in targets)
+
+
+def _dns_binding_matches(rows, desired: DnsRoute) -> bool:
+    binding = [r for r in rows if (r.group, r.interface) == (desired.group, desired.interface)]
+    return len(binding) == 1 and _route_signature(binding[0]) == _route_signature(desired)
+
+
+def _wait_route_state(read, matches, error: str) -> list:
+    """Ожидает актуальную конфигурацию; повторяет только безопасное чтение."""
+    deadline = time.monotonic() + ROUTE_READBACK_TIMEOUT
+    while True:
+        rows = read()
+        if matches(rows):
+            return rows
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning('Истекло ожидание конфигурации: %s', error)
+            raise KeeneticError(error)
+        time.sleep(min(ROUTE_READBACK_POLL, remaining))
 
 
 def _ip_key(route: IpRoute) -> tuple:

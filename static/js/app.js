@@ -489,6 +489,31 @@ function openRouterMenu(btn) {
     });
 }
 
+let themeMenuClosed = 0;
+
+/** Меню кнопки темы: светлая, тёмная или как в системе (без атрибута data-theme). */
+function openThemeMenu(btn) {
+    if (Date.now() - themeMenuClosed < 400) return;   // повторный клик по кнопке только закрывает меню
+    const root = document.documentElement;
+    const current = root.dataset.theme || 'system';
+    const apply = (theme) => {
+        if (theme === 'system') delete root.dataset.theme;
+        else root.dataset.theme = theme;
+        storage('s4r-theme', theme);
+    };
+    const items = [
+        { label: 'Светлая', checked: current === 'light', run: () => apply('light') },
+        { label: 'Тёмная', checked: current === 'dark', run: () => apply('dark') },
+        { label: 'Как в системе', checked: current === 'system', run: () => apply('system') },
+    ];
+    const rect = btn.getBoundingClientRect();
+    btn.setAttribute('aria-expanded', 'true');
+    showMenu(rect.left, rect.bottom + 6, items, (trigger) => {
+        if (trigger && btn.contains(trigger)) themeMenuClosed = Date.now();
+        btn.setAttribute('aria-expanded', 'false');
+    });
+}
+
 /**
  * Настройки подключения. id - существующий роутер (по умолчанию активный), null - новый роутер.
  * Новый роутер сохраняется при первой попытке подключения; если окно закрыли, так и не подключившись,
@@ -3637,12 +3662,7 @@ async function deleteIpRoutes(ids) {
 // ============================================================ обработчики событий
 
 const actions = {
-    theme() {
-        const root = document.documentElement;
-        const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
-        root.dataset.theme = dark ? 'light' : 'dark';
-        storage('s4r-theme', root.dataset.theme);
-    },
+    theme: (el) => openThemeMenu(el),
     settings: () => openSettings(),
     'router-menu': (el) => openRouterMenu(el),
     'dns-reload': () => loadOverview(),

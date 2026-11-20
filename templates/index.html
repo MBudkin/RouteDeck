@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/styles.css?v={{ app_version }}">
     <script>
-        try { const t = localStorage.getItem('s4r-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+        try { const t = localStorage.getItem('s4r-theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
     </script>
 </head>
 <body>
@@ -54,7 +54,7 @@
                 <span class="dot"></span><span class="conn-text">Не подключено</span>
                 <svg class="conn-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
             </button>
-            <button class="icon-btn" data-action="theme" title="Сменить тему">
+            <button class="icon-btn" data-action="theme" title="Тема оформления" aria-haspopup="menu" aria-expanded="false">
                 <svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
             </button>
         </div>

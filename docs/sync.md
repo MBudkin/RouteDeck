@@ -1,6 +1,6 @@
 # Локальная синхронизация исходников
 
-Рабочая папка: `D:\DEVELOPERS\01_Apps\Sites4Router`. Для Git используется отдельное зеркало `.sync-local\repository`: синхронизация не меняет рабочие исходники и не вмешивается в возможные Git-операции в рабочей папке.
+Рабочая папка: `D:\07_Dev\apps\routedeck`. Для Git используется отдельное зеркало `.sync-local\repository`: синхронизация не меняет рабочие исходники и не вмешивается в возможные Git-операции в рабочей папке.
 
 После успешной публикации локальная задача Windows **RouteDeck GitHub Sync** проверяет изменения раз в минуту, когда пользователь вошёл в Windows. Файлы должны оставаться неизменными минимум 30 секунд; затем повторно проверяются их содержимое и разрешённый список. Реальная задержка обычно составляет 30–90 секунд. Компьютер должен быть включён, GitHub доступен, а локальный вход в GitHub CLI действителен.
 
@@ -14,13 +14,13 @@
 
 ```powershell
 # Выключить
-New-Item -ItemType File -Force 'D:\DEVELOPERS\01_Apps\Sites4Router\.sync-local\disabled'
+New-Item -ItemType File -Force 'D:\07_Dev\apps\routedeck\.sync-local\disabled'
 
 # Включить уже настроенную задачу после проверки состояния
-Remove-Item -LiteralPath 'D:\DEVELOPERS\01_Apps\Sites4Router\.sync-local\disabled'
+Remove-Item -LiteralPath 'D:\07_Dev\apps\routedeck\.sync-local\disabled'
 
 # Посмотреть последнее состояние
-Get-Content -LiteralPath 'D:\DEVELOPERS\01_Apps\Sites4Router\.sync-local\status.json'
+Get-Content -LiteralPath 'D:\07_Dev\apps\routedeck\.sync-local\status.json'
 
 # Полностью отключить задачу планировщика
 Disable-ScheduledTask -TaskName 'RouteDeck GitHub Sync'
